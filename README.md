@@ -113,15 +113,13 @@ sequenceDiagram
 
 ## 📸 界面截图
 
-**人工坐席工作台**（三栏：会话列表 / 对话窗口 / 客户信息）
+**数据看板**（ECharts 11 图 · 真实统计：消息趋势 / 渠道分布 / 峰值时段 / 响应时间 / 热门问题 TOP10 / 意图分类）
 
-![人工坐席工作台](docs/screenshots/workbench.png)
+![数据看板](docs/screenshots/dashboard.png)
 
-**数据看板**（ECharts 11 图 · 真实统计：消息趋势 / 渠道分布 / 峰值时段 / 响应时间 / 热门问题 TOP10 / 意图分类 / 三率仪表 / 客户标签）
+**质检 QA**（规则全量扫 + LLM 抽样打分 · Top 缺陷分布 · 低分一键回灌 badcase 回流评测集）
 
-![数据看板](docs/screenshots/dashboard-1.png)
-
-![数据看板-下](docs/screenshots/dashboard-2.png)
+![质检 QA](docs/screenshots/qa.png)
 
 ---
 
