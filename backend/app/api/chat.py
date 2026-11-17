@@ -348,7 +348,16 @@ async def chat(
             badcase_service.enqueue_repeat_soft_safe(
                 query=payload.query, session_id=session_id, user_id=user_id,
             )
-        if guard_result is not None and not guard_result.allowed:
+        # 风险闸必须先于判域闸：维权/投诉类话术在语义上"离域"（不是问商品），
+        # 但它是最高风险场景。实测「再不处理我就打 12315 投诉你们」被判 L2 off_domain，
+        # 直接回欢迎语，从未走到 P0 → 真投诉被当成闲聊静默掉了。
+        # 仅对 off_domain 豁免；违禁品类目（涉毒/枪支）即使含风险词也照拦。
+        p0_early = detect_p0_escalate(payload.query)
+        p0_escapes_guard = (
+            bool(p0_early) and guard_result is not None
+            and guard_result.reason == "off_domain"
+        )
+        if guard_result is not None and not guard_result.allowed and not p0_escapes_guard:
             # 黑名单静默不响应；其他走固定话术
             yield _sse_format({
                 "type": "meta",
@@ -396,7 +405,7 @@ async def chat(
         # P0 高风险关键词检测（投诉/赔付/质量/主动要人工）
         # 放在 detect_handoff_keyword 之前：4 类优先级更精准，命中即带 priority/category 元数据。
         # 未命中再走下面的 detect_handoff_keyword（原 9 词兜底）。
-        p0_hit = detect_p0_escalate(payload.query)
+        p0_hit = p0_early  # 已在 guard 之前算过，复用避免重复匹配
         if p0_hit:
             p0_category, p0_keyword = p0_hit
             p0_priority, p0_label = get_p0_category_info(p0_category)
