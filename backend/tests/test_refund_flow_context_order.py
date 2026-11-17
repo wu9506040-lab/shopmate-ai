@@ -82,6 +82,9 @@ class TestRefundFlowContextOrder:
             "action": type("A", (), {"value": "ask_login_or_list"})(),
             "reason": "zero_orders", "total_orders": 0,
             "effective_order_no": None, "candidate_orders": [], "truncated": False,
+            # 0 单话术要按渠道探测状态生成（哪个渠道查过 / 没查成），
+            # 所以结果对象必须带 channel_probe
+            "channel_probe": [],
             "to_dict": lambda self: {},
         })()
 
@@ -108,7 +111,8 @@ class TestRefundFlowContextOrder:
 
         texts = " ".join(str(e[1]) for e in events if e[0] == "token")
         assert "不存在" not in texts
-        assert "没有订单" in texts
+        # 0 单说的是「没查到」而不是「你没有订单」——渠道可能没查成
+        assert "没查到" in texts or "没有查到" in texts
 
     def test_entity_order_wins_over_context(self):
         """本轮自己报了单号 → 实体优先，不去读 ctx"""
