@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     VECTOR_COLLECTION: str = "knowledge_base"
     MILVUS_URI: str = "http://localhost:19530"
 
+    # ---- 向量库后端（Redis 8 Query Engine / Milvus 双后端，灰度切换用）----
+    # milvus: 走 pymilvus standalone（原路径）；redis: 走 Redis 8 FT.* HNSW 索引
+    VECTOR_BACKEND: str = "milvus"
+    # Redis 后端的 key 前缀与索引名（索引 = {prefix}idx，key = {prefix}{id}）
+    VECTOR_REDIS_PREFIX: str = "kb:"
+
     # ---- Prompt 加载器 ----
     # 相对 backend 根目录的路径；绝对路径可直接覆盖
     # 例如：容器内 /app/config/prompts → PROMPT_DIR=/app/config/prompts

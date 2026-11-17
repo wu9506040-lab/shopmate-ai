@@ -130,13 +130,14 @@ async def health():
     except Exception as e:
         components["redis"] = {"status": "down", "error": str(e)[:100]}
 
-    # Vector
+    # Vector（双后端：milvus / redis，由 VECTOR_BACKEND 决定）
     try:
         _vh = vdb_health()
-        components["milvus"] = {"status": "ok" if _vh["ok"] else "down",
-                                **({"error": _vh["error"]} if _vh.get("error") else {})}
+        components["vector_db"] = {"status": "ok" if _vh["ok"] else "down",
+                                   "backend": settings.VECTOR_BACKEND,
+                                   **({"error": _vh["error"]} if _vh.get("error") else {})}
     except Exception as e:
-        components["milvus"] = {"status": "down", "error": str(e)[:100]}
+        components["vector_db"] = {"status": "down", "error": str(e)[:100]}
 
     # 注入断路器状态（M8）— 独立字段，不参与 overall 判定
     circuit_breaker = {
@@ -146,7 +147,7 @@ async def health():
     # 只统计 mysql / redis / vector 三个核心组件，circuit_breaker 是诊断信息
     overall = (
         "ok"
-        if all(c["status"] == "ok" for c in (components["mysql"], components["redis"], components["milvus"]))
+        if all(c["status"] == "ok" for c in (components["mysql"], components["redis"], components["vector_db"]))
         else "degraded"
     )
     return {

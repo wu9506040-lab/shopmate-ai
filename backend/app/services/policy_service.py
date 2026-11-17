@@ -141,7 +141,7 @@ def _slice_rows_cached(model: str) -> tuple:
     try:
         from app.clients.vector_db import COLLECTION_NAME, get_client
 
-        rows = get_client()._raw.query(
+        rows = get_client().query(
             collection_name=COLLECTION_NAME,
             filter=f'doc_key == "{_SLICE_DOC_PREFIX}{model}"',
             output_fields=["*"],

@@ -223,7 +223,10 @@ services:
   # Redis 缓存
   # ---------------------------------------------------------
   redis:
-    image: redis:7-alpine
+    # Redis 8：向量搜索已合入核心（Query Engine），承担缓存 + 知识库向量库双职责。
+    # 注意 maxmemory 需覆盖向量索引（10 万条 1024 维 float32 ≈ 400MB），届时上调此处
+    # 与 resources.limits，或 int8 量化压缩。
+    image: redis:8-alpine
     container_name: customer-service-redis
     restart: unless-stopped
     ports:
