@@ -1,0 +1,242 @@
+-- =============================================================
+-- 智能客服 Agent 系统 - MySQL 数据库 Schema
+-- 数据库: customer_service（由 MYSQL_DATABASE 环境变量自动创建）
+-- 字符集: utf8mb4 / utf8mb4_unicode_ci（继承自 mysqld 命令行）
+-- 设计: 5 张表
+--   1. users                - 用户主体
+--   2. conversations        - 会话索引（与 Redis session_id 对齐）
+--   3. messages             - 消息明细
+--   4. knowledge_documents  - 知识库文档元数据（与 Milvus source 对齐）
+--   5. operation_logs       - 操作审计日志
+--
+-- 命名约定:
+--   - 表名小写 + 下划线
+--   - id BIGINT UNSIGNED PK AUTO_INCREMENT
+--   - create_time / update_time 由 MySQL 自动维护
+--   - deleted TINYINT DEFAULT 0 配合业务层逻辑删除
+--   - 外键一律逻辑关联（不建 DB 级 FK 约束）
+-- =============================================================
+
+USE `customer_service`;
+
+-- =============================================================
+-- 1. users - 用户主体
+-- =============================================================
+DROP TABLE IF EXISTS `users`;
+CREATE TABLE `users` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT            COMMENT '主键',
+  `username`        VARCHAR(64)  NOT NULL                              COMMENT '登录名（唯一）',
+  `password_hash`   VARCHAR(255) NOT NULL                              COMMENT 'bcrypt 哈希后的密码',
+  `display_name`    VARCHAR(200) DEFAULT NULL                          COMMENT '显示名',
+  `email`           VARCHAR(200) DEFAULT NULL                          COMMENT '邮箱（唯一，可空）',
+  `phone`           VARCHAR(32)  DEFAULT NULL                          COMMENT '手机号（唯一，可空）',
+  `role`            VARCHAR(32)  NOT NULL DEFAULT 'user'               COMMENT '角色: user / admin',
+  `status`          TINYINT      NOT NULL DEFAULT 1                    COMMENT '状态: 1=启用 / 0=禁用',
+  `last_login_at`   DATETIME     DEFAULT NULL                          COMMENT '最后登录时间',
+  `last_login_ip`   VARCHAR(64)  DEFAULT NULL                          COMMENT '最后登录 IP',
+  `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`         TINYINT      NOT NULL DEFAULT 0                    COMMENT '逻辑删除: 0=未删 / 1=已删',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_users_username` (`username`),
+  UNIQUE KEY `uk_users_email`    (`email`),
+  UNIQUE KEY `uk_users_phone`    (`phone`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
+
+-- =============================================================
+-- 2. conversations - 会话索引
+-- 与 Redis chat:session:{session_id} 共用同一个 session_id
+-- Redis 是热路径（24h TTL），MySQL 是冷路径真源（永不过期）
+-- =============================================================
+DROP TABLE IF EXISTS `conversations`;
+CREATE TABLE `conversations` (
+  `id`                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT        COMMENT '主键',
+  `session_id`        VARCHAR(64)  NOT NULL                          COMMENT '会话 ID（与 Redis 对齐）',
+  `user_id`           BIGINT UNSIGNED NOT NULL                       COMMENT '所属用户 ID（逻辑外键 → users.id）',
+  `title`             VARCHAR(200) DEFAULT NULL                      COMMENT '会话标题（首问摘要或用户改）',
+  `status`            TINYINT      NOT NULL DEFAULT 1                COMMENT '状态: 1=进行中 / 0=已结束',
+  `message_count`     INT          NOT NULL DEFAULT 0                COMMENT '消息数（冗余，便于列表查询）',
+  `first_query`       VARCHAR(500) DEFAULT NULL                      COMMENT '首条问题（用于列表展示）',
+  `last_message_at`   DATETIME     DEFAULT NULL                      COMMENT '最后一条消息时间',
+  `create_time`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`           TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_conversations_session_id` (`session_id`),
+  KEY `idx_conversations_user_status_time` (`user_id`, `status`, `last_message_at` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话表';
+
+-- =============================================================
+-- 3. messages - 消息明细
+-- 存所有轮次问答，Redis miss 时从 MySQL 按 session_id+create_time 回填最近 20 条
+-- =============================================================
+DROP TABLE IF EXISTS `messages`;
+CREATE TABLE `messages` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT              COMMENT '主键',
+  `session_id`    VARCHAR(64)  NOT NULL                               COMMENT '所属会话 ID（逻辑外键 → conversations.session_id）',
+  `user_id`       BIGINT UNSIGNED NOT NULL                            COMMENT '所属用户 ID（冗余便于查询）',
+  `role`          VARCHAR(16)  NOT NULL                               COMMENT '角色: user / assistant / system',
+  `content`       TEXT         NOT NULL                               COMMENT '消息正文',
+  `contexts`      JSON         DEFAULT NULL                           COMMENT 'RAG 检索的 context 列表（仅 assistant）',
+  `scores`        JSON         DEFAULT NULL                           COMMENT 'context 对应分数（仅 assistant）',
+  `token_count`   INT          DEFAULT NULL                           COMMENT 'LLM token 数（仅 assistant）',
+  `latency_ms`    INT          DEFAULT NULL                           COMMENT '响应耗时 ms（仅 assistant）',
+  `create_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`       TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_messages_session_time` (`session_id`, `create_time`),
+  KEY `idx_messages_user_time`    (`user_id`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息明细表';
+
+-- =============================================================
+-- 4. knowledge_documents - 知识库文档元数据
+-- 与 Milvus payload.source 字段对齐（同样作为幂等键）
+-- 实际向量存在 Milvus，本表只存「文档是什么」的元数据
+-- =============================================================
+DROP TABLE IF EXISTS `knowledge_documents`;
+CREATE TABLE `knowledge_documents` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT            COMMENT '主键',
+  `source`          VARCHAR(200) NOT NULL                              COMMENT '来源标识（与 Milvus payload.source 对齐，唯一）',
+  `title`           VARCHAR(500) DEFAULT NULL                          COMMENT '文档标题',
+  `description`     TEXT         DEFAULT NULL                          COMMENT '描述',
+  `doc_type`        VARCHAR(32)  NOT NULL DEFAULT 'manual'             COMMENT '类型: manual / faq / policy / product',
+  -- 2026-11 版本化：同一主题(doc_key)可有多份文档，按生效时间选当前版本
+  `doc_key`         VARCHAR(64)  DEFAULT NULL                           COMMENT '主题键：尺码指南/退换货政策/商品参数等，同主题多版本共用',
+  `revision`        VARCHAR(32)  DEFAULT NULL                           COMMENT '版本号（同生效日并列时的决胜字段）',
+  `validity`        VARCHAR(16)  NOT NULL DEFAULT 'permanent'           COMMENT 'permanent 长期 / temporary 临时',
+  `effective_from`  BIGINT       NOT NULL DEFAULT 0                     COMMENT '生效日 00:00 的秒级时间戳（东八区）',
+  `effective_to`    BIGINT       NOT NULL DEFAULT 0                     COMMENT '失效日 00:00 的秒级时间戳；0=长期',
+  `total_chunks`    INT          NOT NULL DEFAULT 0                    COMMENT 'chunk 数（冗余）',
+  `total_chars`     INT          NOT NULL DEFAULT 0                    COMMENT '字符数（冗余）',
+  `uploader_id`     BIGINT UNSIGNED DEFAULT NULL                       COMMENT '上传者 ID（逻辑外键 → users.id）',
+  `status`          TINYINT      NOT NULL DEFAULT 1                    COMMENT '状态: 1=上线 / 0=下线',
+  `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`         TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_knowledge_source` (`source`),
+  KEY `idx_knowledge_status_type` (`status`, `doc_type`),
+  KEY `idx_knowledge_doc_key_time` (`doc_key`, `effective_from`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='知识库文档元数据';
+
+-- =============================================================
+-- 5. operation_logs - 操作审计日志
+-- 记录关键行为：登录 / 灌库 / 删库 / 删会话 等
+-- 注意: 不记录闲聊内容（消息正文存 messages 表），只记元动作
+-- =============================================================
+DROP TABLE IF EXISTS `operation_logs`;
+CREATE TABLE `operation_logs` (
+  `id`              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT            COMMENT '主键',
+  `user_id`         BIGINT UNSIGNED DEFAULT NULL                       COMMENT '操作用户 ID（可空：未登录的请求）',
+  `username`        VARCHAR(64)  DEFAULT NULL                          COMMENT '用户名（冗余防改名/删除）',
+  `action`          VARCHAR(64)  NOT NULL                              COMMENT '动作: login / ingest / delete_knowledge / ...',
+  `target_type`     VARCHAR(32)  DEFAULT NULL                          COMMENT '对象类型: knowledge / user / session',
+  `target_id`       VARCHAR(64)  DEFAULT NULL                          COMMENT '对象 ID',
+  `ip`              VARCHAR(64)  DEFAULT NULL                          COMMENT '来源 IP',
+  `user_agent`      VARCHAR(500) DEFAULT NULL                          COMMENT 'UA',
+  `detail`          JSON         DEFAULT NULL                          COMMENT '额外参数（JSON）',
+  `result`          VARCHAR(16)  NOT NULL DEFAULT 'success'            COMMENT '结果: success / fail',
+  `error_msg`       VARCHAR(500) DEFAULT NULL                          COMMENT '失败原因（result=fail 时填写）',
+  `create_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`         TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_logs_user_time`  (`user_id`, `create_time`),
+  KEY `idx_logs_action_time` (`action`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='操作审计日志';
+
+-- =============================================================
+-- 6. products - 商品主表
+-- 入 RAG：name + description
+-- 不入 RAG：review_text（独立字段，防噪音）
+-- attributes 用 JSON 存颜色/规格等动态属性
+-- =============================================================
+DROP TABLE IF EXISTS `products`;
+CREATE TABLE `products` (
+  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT                  COMMENT '主键',
+  `sku`          VARCHAR(50)  NOT NULL                                    COMMENT '业务编号 FS{商品ID}-{尺码}',
+  `name`         VARCHAR(200) NOT NULL                                    COMMENT '商品名',
+  `description`  TEXT         DEFAULT NULL                                COMMENT '商品详情（入 RAG）',
+  `price`        DECIMAL(10,2) NOT NULL                                   COMMENT '售价',
+  `attributes`   JSON         DEFAULT NULL                                COMMENT '动态属性 JSON（颜色/规格）',
+  `review_text`  TEXT         DEFAULT NULL                                COMMENT '用户评价（不入 RAG）',
+  `stock`        INT          NOT NULL DEFAULT 0                          COMMENT '库存',
+  `status`       TINYINT      NOT NULL DEFAULT 1                          COMMENT '状态: 0=下架 / 1=在售',
+  `create_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`      TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_products_sku` (`sku`),
+  KEY `idx_products_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='商品表';
+
+-- =============================================================
+-- 7. orders - 订单主表
+-- 状态机: pending → paid → shipped → delivered → completed
+--                                         ↘ refunded（任意阶段可发起）
+-- 业务编号 order_no 唯一，业务层展示用
+-- =============================================================
+DROP TABLE IF EXISTS `orders`;
+CREATE TABLE `orders` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT                COMMENT '主键',
+  `order_no`      VARCHAR(32)  NOT NULL                                  COMMENT '业务编号 ORD20260620001',
+  `user_id`       BIGINT UNSIGNED NOT NULL                               COMMENT '所属用户 ID（逻辑外键 → users.id）',
+  `status`        VARCHAR(16)  NOT NULL DEFAULT 'pending'                COMMENT '状态: pending/paid/shipped/delivered/completed/refunded',
+  `total_amount`  DECIMAL(10,2) NOT NULL DEFAULT 0                       COMMENT '订单总额',
+  `address_id`    BIGINT UNSIGNED DEFAULT NULL                           COMMENT '收货地址 ID（暂 NULL）',
+  `receiver_name` VARCHAR(64)  DEFAULT NULL                              COMMENT '收件人姓名（2026-11 改电话写操作引入）',
+  `receiver_phone` VARCHAR(32) DEFAULT NULL                              COMMENT '收件人电话（同上）',
+  `create_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`       TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_orders_order_no` (`order_no`),
+  KEY `idx_orders_user_status_time` (`user_id`, `status`, `create_time` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单表';
+
+-- =============================================================
+-- 8. order_items - 订单明细
+-- 冗余 sku + product_name：商品改名/下架后订单历史仍可读
+-- =============================================================
+DROP TABLE IF EXISTS `order_items`;
+CREATE TABLE `order_items` (
+  `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT              COMMENT '主键',
+  `order_id`      BIGINT UNSIGNED NOT NULL                             COMMENT '所属订单 ID（逻辑外键 → orders.id）',
+  `product_id`    BIGINT UNSIGNED NOT NULL                             COMMENT '商品 ID（逻辑外键 → products.id）',
+  `sku`           VARCHAR(50)  NOT NULL                                COMMENT '冗余 SKU（商品改名后订单仍可读）',
+  `product_name`  VARCHAR(200) NOT NULL                                COMMENT '冗余商品名',
+  `qty`           INT          NOT NULL DEFAULT 1                      COMMENT '数量',
+  `unit_price`    DECIMAL(10,2) NOT NULL                               COMMENT '下单单价',
+  `subtotal`      DECIMAL(10,2) NOT NULL                               COMMENT '小计 = qty * unit_price',
+  `create_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`       TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_order_items_order` (`order_id`),
+  KEY `idx_order_items_product` (`product_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='订单明细表';
+
+-- =============================================================
+-- 9. refunds - 退款表
+-- 状态机: pending → approved → completed
+--                  → rejected（终态）
+-- =============================================================
+DROP TABLE IF EXISTS `refunds`;
+CREATE TABLE `refunds` (
+  `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT                COMMENT '主键',
+  `refund_no`    VARCHAR(32)  NOT NULL                                  COMMENT '业务编号 RF20260605001',
+  `order_id`     BIGINT UNSIGNED NOT NULL                               COMMENT '所属订单 ID（逻辑外键 → orders.id）',
+  `user_id`      BIGINT UNSIGNED NOT NULL                               COMMENT '申请人 ID（逻辑外键 → users.id）',
+  `reason`       VARCHAR(500) NOT NULL                                  COMMENT '退款原因',
+  `status`       VARCHAR(16)  NOT NULL DEFAULT 'pending'                COMMENT '状态: pending/approved/rejected/completed',
+  `amount`       DECIMAL(10,2) NOT NULL                                 COMMENT '退款金额',
+  `remark`       TEXT         DEFAULT NULL                              COMMENT '审核备注',
+  `create_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted`      TINYINT      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_refunds_refund_no` (`refund_no`),
+  KEY `idx_refunds_order` (`order_id`),
+  KEY `idx_refunds_user_status` (`user_id`, `status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='退款表';

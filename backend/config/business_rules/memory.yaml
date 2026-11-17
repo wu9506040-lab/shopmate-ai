@@ -1,0 +1,43 @@
+# memory_contract.py 业务规则（L1 工作记忆预算）
+# 加载入口：app.services.config_loader.get_config_loader().load("memory")
+# 启动期一次加载；改完需重启服务（不参与热更新）
+#
+# 为什么不用 query_rewriter.yaml 里的 MAX_HISTORY_TURNS：
+# 那个是「4 条消息」，这里要的是「10 轮问答」。同名不同义，混用必错。
+#
+# 预算依据：
+#   单条资料上限 POLICY_CTX_CHAR_LIMIT=1000，政策/商品各 3 条 ≈ 3000 字符。
+#   history 控制在资料位六成以内（1800），再长就是历史把资料挤掉——
+#   那是本末倒置：买家要的是答案，不是回忆。
+MAX_HISTORY_ROUNDS: 10
+HISTORY_CHAR_BUDGET: 1800
+
+# 单条消息硬截断：一条 5000 字的答案能独占整个预算。
+# 截断保留开头（结论通常在开头），尾巴上"…"。
+MAX_SINGLE_MSG_CHARS: 600
+
+# 被裁掉的轮次先压成"可验证的要点"再丢，不再整轮蒸发。
+# 只抽白名单模式（金额/尺码/明确的偏好陈述），不写自由文本摘要；
+# 订单号、手机号、地址一律不进摘要。240 字是摘要自己的上限，
+# 不占正文的 1800 预算——宁可总共多 240 字，也不要把丢掉的事实找不回来。
+COMPACT_SUMMARY_CHAR_BUDGET: 240
+
+# ---- 资料位总预算（RAG 路径，不是记忆） ----
+# 单条上限 POLICY_CTX_CHAR_LIMIT=1000 只管"每条多长"，管不住"给几条"：
+# top_k=5 就是 5000 字符，比 history(1800) 和工具结果预算都大。
+# 这里封的是一整段 policy_block 的上限，超了按排名截断并在末尾声明少给了几条。
+RAG_CTX_TOTAL_CHARS: 3500
+
+# ---- 工具结果预算（FC 路径，不属于 L1 工作记忆） ----
+# agent_runner 会把工具返回原样塞进 messages。商品搜索 20 条 / 物流 30 个节点
+# 一次就是 6-10k 字符，多轮累积会把 history 和资料位一起挤掉。
+# 这里管的是「模型能看到多少」，不是「工具返回多少」——工具和前端不受影响。
+TOOL_RESULT_MAX_CHARS: 2000        # 单条结果序列化后的硬上限
+TOOL_RESULT_MAX_LIST_ITEMS: 5      # 列表保留前 N 条（工具返回本身有序）
+TOOL_RESULT_MAX_FIELD_CHARS: 300   # 单个字符串字段上限
+# 整个 FC 循环里所有 tool 消息的累计上限（单条管住之后，多轮仍会叠加）。
+# 5 轮 × 2 工具 × 2000 = 2 万，比 history(1800) + 资料位(3000) 大一个量级，
+# 不封顶就会把它们一起挤掉。超了从最早的开始换 stub，最近 2 条不动。
+TOOL_CONTEXT_MAX_CHARS: 6000
+# 调试字段直接丢（不许出现在这里的是业务字段：ticket_id/confirmed/order_no/status）
+TOOL_RESULT_DROP_KEYS: debug,raw,_internal,trace,sql,stack

@@ -1,0 +1,6 @@
+# 只放行可执行 jar；编译中间产物/测试报告不进构建上下文
+target/*
+!target/cs-platform-*.jar
+.git/
+.idea/
+*.iml

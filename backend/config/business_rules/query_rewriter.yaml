@@ -1,0 +1,50 @@
+# query_rewriter.py 业务规则（）
+# 加载入口：app.services.config_loader.get_config_loader().load("query_rewriter")
+# 启动期一次加载；改完需重启服务（roadmap §3.5 不参与热更新）
+# 字段分类：
+#   L0 指代词清单：COREFERENCE_PATTERNS（20 个电商高频代词，"它|他们|..." 拼接后 re.compile）
+#   L1 history 截断：MAX_HISTORY_TURNS / MAX_HISTORY_MSG_LEN
+#   L2 改写结果防护：MAX_REWRITE_RATIO / MAX_REWRITE_EXTRA
+
+# === L0 指代词清单（电商客服多轮对话高频观察 + 中文指代词表精简）===
+# 用 re.escape + "|" 拼接后 re.compile，避免代词里出现特殊正则字符时漏匹配
+COREFERENCE_PATTERNS:
+  - 它
+  - 他们
+  - 这个
+  - 那个
+  - 这些
+  - 那些
+  - 刚才
+  - 之前
+  - 上面
+  - 下面
+  - 那款
+  - 这款
+  - 这种
+  - 那种
+  - 前一个
+  - 后一个
+  - 前者
+  - 后者
+  - 这里
+  - 那里
+
+# === L1 history 截短阈值（避免 prompt 过长）===
+# 仅取最近 MAX_HISTORY_TURNS 条
+MAX_HISTORY_TURNS: 8
+# history 单条最长字符数（超出截断 + "..."）
+MAX_HISTORY_MSG_LEN: 100
+
+# === L2 改写结果长度防护（防 LLM 失控输出）===
+# 改写结果 ≤ 原 query * MAX_REWRITE_RATIO + MAX_REWRITE_EXTRA
+MAX_REWRITE_RATIO: 3
+MAX_REWRITE_EXTRA: 50
+
+# === Phase 4 A4: Multi-Query 配置 ===
+# 总开关（默认 false，灰度用；运行时通过 settings.ENABLE_MULTI_QUERY 覆盖）
+ENABLE_MULTI_QUERY: false
+# 变体数量上限（N ≤ 3 控成本；LLM 一次返回 n+1 条，padding 用原 query 填充）
+MULTI_QUERY_COUNT: 3
+# 触发条件：coref_only（仅含指代词才走 Multi-Query；other 变体留待后续 ）
+MULTI_QUERY_TRIGGER: "coref_only"

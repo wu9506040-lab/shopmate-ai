@@ -1,0 +1,24 @@
+# 本地开发 profile：不依赖 Docker —— H2 内存库（MySQL 兼容模式）+ mock AI
+# 用法：java -jar cs-platform.jar --spring.profiles.active=local
+spring:
+  datasource:
+    url: jdbc:h2:mem:platform;DB_CLOSE_DELAY=-1;MODE=MySQL;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password: ""
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema-h2.sql
+
+platform:
+  # 本地开发专用密钥（仅 local profile；生产 profile 不设默认，缺失即 fail-fast）
+  jwt:
+    secret: local-dev-secret-not-for-production
+    expire-hours: 24
+    cookie-name: cs_token
+  seed:
+    enabled: true
+
+logging:
+  level:
+    com.zhixuan.platform: DEBUG

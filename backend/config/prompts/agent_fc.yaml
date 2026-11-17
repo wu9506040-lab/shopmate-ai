@@ -1,0 +1,30 @@
+# agent_fc prompt manifest（多版本机制）
+# 落地 PromptLoader manifest 模式：
+# - default_version: 当前激活的版本号（v2 = 函数工具版）
+# - versions: 版本字典，每个版本指向一个内容文件
+#   - file: 相对 prompts/ 目录的 YAML 文件路径
+#   - stable: 是否为稳定版
+#   - note: 版本说明
+# 版本说明：
+# - v1: 3 工具简版（lookup_order / search_product / search_policy）
+# - v2: 完整工具集；写操作只保留改地址/改电话，且仅未发货可改，发货后转人工
+# 灰度策略：本 manifest 仅做版本管理；启用走 settings.ENABLE_AGENT_FC 开关。
+
+default_version: v2
+versions:
+  v1:
+    file: agent_fc_v1.yaml
+    stable: true
+    note: |
+      简版。3 工具（lookup_order / search_product / search_policy）。
+      切到该版本即使用简版工具集。
+  v2:
+    file: agent_fc_v2.yaml
+    stable: true
+    note: |
+      完整工具集（4 基础 + 6 服务工具 + 2 写操作）。
+      写操作只有 modify_address / modify_contact，且**仅未发货（pending/paid）可改**；
+      已发货（含已发货未揽收）及之后状态 → 工具返回 needs_handoff 并自动建人工工单。
+      改规格 / 合并订单已从工具面移除（service 层能力保留，不在 AI 可达范围）。
+      写操作 2 步确认：必须 confirmed=true 才执行；否则返
+      {"status": "needs_confirmation"} 让 AI 询问用户，确认后消费审批票据。

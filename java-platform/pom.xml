@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  智能客服中台 - Java 平台层（P1 骨架）
+  职责边界：平台业务（鉴权/会话/工单/看板聚合）在 Java，AI 推理在 Python 服务
+  选型说明见 README.md「设计决策」
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.5</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.zhixuan</groupId>
+  <artifactId>cs-platform</artifactId>
+  <version>0.1.0</version>
+  <name>cs-platform</name>
+  <description>智能客服中台 - Java 平台层</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <jjwt.version>0.12.6</jjwt.version>
+  </properties>
+
+  <dependencies>
+    <!-- Web 层（MVC + SseEmitter）。选 MVC 而非 WebFlux：透传用独立线程池即可，
+         团队心智模型与排障成本更低（见 README 设计决策 #2） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- DB 访问：JdbcTemplate 而非 JPA。
+         表结构真源在 Python SQLAlchemy models，JPA 双重映射会造成两处 schema 漂移；
+         JdbcTemplate 显式 SQL 与 Python 侧语义逐条对齐（见 README 设计决策 #3） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <!-- H2：仅本地开发/测试 profile 用（不依赖 Docker 起真 MySQL），生产不打进镜像 -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- 只取 spring-security-crypto 的 BCrypt（兼容 Python 侧 $2b$ 哈希），
+         不引入完整 Security 过滤链 —— 鉴权逻辑自己掌控，避免两套安全机制叠加 -->
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-crypto</artifactId>
+    </dependency>
+
+    <!-- JWT：不用 jjwt —— 其强制 HMAC 密钥 ≥256bit，与 python-jose 行为不一致，
+         短密钥场景会拒收 Python 合法签发的 token（实测踩中）。
+         改为纯 JDK HMAC 实现（JwtService），字节级对齐 python-jose。 -->
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>

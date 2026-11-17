@@ -1,0 +1,50 @@
+/* =============================================================
+   全局样式 — Dark Editorial
+   设计令牌：./styles/tokens.css（单一来源）
+   页面级版式由各视图的 scoped 样式负责，这里只放全局基线。
+   ============================================================= */
+@import './styles/tokens.css';
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body,
+#app {
+  height: 100%;
+  font-family: var(--font-base);
+  font-size: var(--fs-base);
+  color: var(--gray-800);
+  background: var(--gray-50);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button {
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease,
+              color 180ms ease, transform 180ms ease;
+}
+button:active { transform: translateY(1px); }
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--jd-red);
+  outline-offset: 2px;
+}
+button:disabled { cursor: not-allowed; }
+input,
+textarea { font-family: inherit; font-size: inherit; }
+ul { list-style: none; }
+a { color: inherit; text-decoration: none; }
+img { display: block; }
+::selection { background: rgba(196, 112, 60, 0.35); color: #fff; }
+
+/* 细滚动条，避免深色页面出现粗白条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--gray-0); }
+::-webkit-scrollbar-thumb { background: var(--gray-300); }
+::-webkit-scrollbar-thumb:hover { background: var(--gray-400); }

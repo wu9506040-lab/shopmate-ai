@@ -1,0 +1,55 @@
+# V16.8 P1 daemon container image
+# - goofish-cli 走纯 python, 但 cookie 登录需要 Playwright + Chromium
+# - Linux 容器内 Playwright + google-chrome-stable 跨 OS 行为一致 (无 Windows WSS bug)
+
+FROM python:3.12-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai
+
+WORKDIR /app
+
+# 系统依赖: curl / procps (健康检查) + Playwright 浏览器依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        procps \
+        tzdata \
+        # Playwright Chromium 运行时依赖
+        libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+        libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+        libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
+        # 字符编码
+        fonts-noto-cjk fonts-noto-cjk-extra \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# goofish-cli (含 playwright 依赖)
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN pip install -i https://mirrors.aliyun.com/pypi/simple/ \
+        --trusted-host mirrors.aliyun.com \
+        -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
+# 应用代码 (daemon 需要 app.* 模块路径)
+COPY backend/app/ /app/backend/app/
+COPY backend/config/ /app/backend/config/
+
+# Daemon 启动脚本（放在 /app/scripts 下：脚本按 parent.parent 推算 /app/backend
+# 作为 sys.path 与日志根，放到 /app 根目录会算成 / 导致 chdir 失败）
+RUN mkdir -p /app/scripts
+COPY scripts/run_xianyu_daemon.py /app/scripts/run_xianyu_daemon.py
+RUN chmod +x /app/scripts/run_xianyu_daemon.py
+
+# QR 登录辅助脚本 (容器内手动跑一次生成 cookie)
+COPY deploy/do_qr_login.py /app/do_qr_login.py
+RUN chmod +x /app/do_qr_login.py
+
+# 入口
+# QR 登录引导 (cookie 缺失时阻塞等用户扫码)
+COPY deploy/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD []

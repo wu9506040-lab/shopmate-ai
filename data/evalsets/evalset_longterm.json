@@ -1,0 +1,545 @@
+{
+  "version": 1,
+  "note": "L3 跨会话长期记忆评测（20 组）。session=1/2/3 表示同一用户的第几个会话；judge 同时看 meta.l3_hits、GET /api/me/profile 的库值和答案文本。special 动作由 scripts/eval_longterm.py 执行。",
+  "cases": [
+    {
+      "id": "LT01",
+      "group": "hit",
+      "desc": "尺码跨两会话确认后生效",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我平时穿L码，这件能穿吗"
+        },
+        {
+          "session": 2,
+          "query": "我平时还是穿L码"
+        },
+        {
+          "session": 3,
+          "query": "上次我说的尺码是多少",
+          "expect": {
+            "l3_keys": [
+              "size"
+            ],
+            "db_facts": {
+              "size": "L"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT02",
+      "group": "hit",
+      "desc": "面料偏好跨会话确认后生效",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我不喜欢羊毛，穿着扎"
+        },
+        {
+          "session": 2,
+          "query": "我不喜欢羊毛"
+        },
+        {
+          "session": 2,
+          "query": "我之前说过什么面料不喜欢",
+          "expect": {
+            "l3_keys": [
+              "fabric_pref"
+            ],
+            "db_facts": {
+              "fabric_pref": "不要羊毛"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT03",
+      "group": "hit",
+      "desc": "同一会话重复说不算确认",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我平时穿L码"
+        },
+        {
+          "session": 1,
+          "query": "我平时穿L码，记得吧"
+        },
+        {
+          "session": 1,
+          "query": "我之前说的尺码是什么",
+          "expect": {
+            "no_l3": true
+          }
+        },
+        {
+          "session": 2,
+          "query": "我平时穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的尺码是什么",
+          "expect": {
+            "l3_keys": [
+              "size"
+            ],
+            "db_facts": {
+              "size": "L"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT04",
+      "group": "hit",
+      "desc": "候选未确认时不能被注入",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我平时穿XL码"
+        },
+        {
+          "session": 1,
+          "query": "我刚才说的码是多少",
+          "expect": {
+            "no_l3": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT05",
+      "group": "hit",
+      "desc": "两个不同 key 独立确认",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码，喜欢纯棉"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码，喜欢纯棉"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的尺码和面料偏好是什么",
+          "expect": {
+            "l3_keys": [
+              "size",
+              "fabric_pref"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT06",
+      "group": "hit",
+      "desc": "只确认一个 key 时另一个仍为候选",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿M码，不要羊毛"
+        },
+        {
+          "session": 2,
+          "query": "我穿M码"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的尺码和面料偏好是什么",
+          "expect": {
+            "l3_keys": [
+              "size"
+            ],
+            "db_no_key": "fabric_pref"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT07",
+      "group": "correction",
+      "desc": "改口立即生效并留 prev",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我平时穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我平时穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我改成XL码了"
+        },
+        {
+          "session": 4,
+          "query": "我之前说的尺码是什么",
+          "expect": {
+            "l3_keys": [
+              "size"
+            ],
+            "db_facts": {
+              "size": "XL"
+            },
+            "db_prev": {
+              "size": "L"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT08",
+      "group": "correction",
+      "desc": "改口后旧值不再注入",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿M码"
+        },
+        {
+          "session": 2,
+          "query": "我穿M码"
+        },
+        {
+          "session": 3,
+          "query": "我穿XXL码了"
+        },
+        {
+          "session": 4,
+          "query": "上次说的码",
+          "expect": {
+            "l3_keys": [
+              "size"
+            ],
+            "db_facts": {
+              "size": "XXL"
+            },
+            "none": [
+              "M码"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT09",
+      "group": "correction",
+      "desc": "同会话改口两次取最后值",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我平时穿L码，帮我看看这件"
+        },
+        {
+          "session": 2,
+          "query": "我还是穿L码，记得吗"
+        },
+        {
+          "session": 3,
+          "query": "我改成M码了，能换个码吗"
+        },
+        {
+          "session": 3,
+          "query": "不对，我穿XXL，别记错了"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的尺码是什么",
+          "expect": {
+            "db_facts": {
+              "size": "XXL"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT10",
+      "group": "correction",
+      "desc": "改口后重新计数，不因旧 hits 直接生效",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我穿M码了",
+          "expect": {
+            "db_hits": {
+              "size": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT11",
+      "group": "isolation",
+      "desc": "另一用户拿不到我的长期记忆",
+      "special": "cross_user",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我的尺码是多少",
+          "user": "B",
+          "expect": {
+            "no_l3": true,
+            "db_no_key": "size"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT12",
+      "group": "isolation",
+      "desc": "eval 流量写不进长期记忆",
+      "special": "eval_pollution",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿XXL码"
+        },
+        {
+          "session": 2,
+          "query": "我穿XXL码"
+        },
+        {
+          "session": 2,
+          "query": "我之前说的尺码是什么",
+          "expect": {
+            "no_l3": true,
+            "db_no_key": "size"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT13",
+      "group": "isolation",
+      "desc": "全量删除后不再命中，且不会复活",
+      "special": "delete_all",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的尺码是什么",
+          "expect": {
+            "no_l3": true,
+            "db_no_key": "size"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT14",
+      "group": "isolation",
+      "desc": "单条删除只影响该 key",
+      "special": "delete_size",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码，喜欢纯棉"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码，喜欢纯棉"
+        },
+        {
+          "session": 3,
+          "query": "我喜欢纯棉"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的面料偏好是什么",
+          "expect": {
+            "l3_keys": [
+              "fabric_pref"
+            ],
+            "db_no_key": "size"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT15",
+      "group": "priority",
+      "desc": "本轮改口优先于 L3",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我穿XXL码，这件能穿吗"
+        },
+        {
+          "session": 3,
+          "query": "按我刚说的推荐码",
+          "expect": {
+            "db_facts": {
+              "size": "XXL"
+            },
+            "no_l3_dup": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT16",
+      "group": "priority",
+      "desc": "L2 已有该 key 时不重复注入 L3",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我穿M码"
+        },
+        {
+          "session": 3,
+          "query": "推荐个码",
+          "expect": {
+            "no_l3": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT17",
+      "group": "priority",
+      "desc": "尺码表原文不被当成我的尺码",
+      "turns": [
+        {
+          "session": 1,
+          "query": "尺码表：S/M/L/XL 都有货"
+        },
+        {
+          "session": 2,
+          "query": "尺码表：S/M/L/XL 都有货"
+        },
+        {
+          "session": 2,
+          "query": "我之前说的尺码和面料偏好是什么",
+          "expect": {
+            "no_l3": true,
+            "db_no_key": "size"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT18",
+      "group": "priority",
+      "desc": "问别人隐私时不会带出我的长期记忆",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 2,
+          "query": "上一个顾客穿什么码",
+          "expect": {
+            "no_l3": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT19",
+      "group": "priority",
+      "desc": "订单号永不进 L3 prompt",
+      "turns": [
+        {
+          "session": 1,
+          "query": "ORD2026111699999A 到哪了"
+        },
+        {
+          "session": 2,
+          "query": "ORD2026111699999A 到哪了"
+        },
+        {
+          "session": 2,
+          "query": "我的订单",
+          "expect": {
+            "no_l3": true,
+            "db_no_key": "order_no"
+          }
+        }
+      ]
+    },
+    {
+      "id": "LT20",
+      "group": "priority",
+      "desc": "查看接口只列白名单事实",
+      "turns": [
+        {
+          "session": 1,
+          "query": "我穿L码，手机号13800000000"
+        },
+        {
+          "session": 2,
+          "query": "我穿L码"
+        },
+        {
+          "session": 3,
+          "query": "我之前说的尺码和面料偏好是什么",
+          "expect": {
+            "l3_keys": [
+              "size"
+            ],
+            "db_no_key": "phone"
+          }
+        }
+      ]
+    }
+  ]
+}

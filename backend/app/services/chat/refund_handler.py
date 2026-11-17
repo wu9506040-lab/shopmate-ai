@@ -1,0 +1,305 @@
+"""
+Refund Handler——退款引擎本体 + 降级阶梯（V21 收口：从"临时双轨"改为显式契约）
+
+之前这里挂着"临时双轨态，V3 稳定后清理"的模糊注释。实际审查结论：
+不是待清理的遗留，而是**退款四级降级阶梯的第 2 级**，每一级都有明确的
+失败条件与接管方：
+
+    1. RefundFlow（LangGraph 主引擎）      —— 正常态（demo .env.dev 即此档）
+       decide / fetch_policy / synthesize / escalate + Checkpointer 续跑
+    2. handle_refund_v2（本文件，保险丝）  —— 图引擎异常时接管
+       refund_flow.py:539 except → handle_refund_v2；纯 RefundService 复合工具
+       + 政策 RAG + LLM 综合，**不依赖 LangGraph / Checkpointer / Redis**
+    3. 转人工（EscalationService）         —— V2 也失败
+       refund_flow.py:553 → EscalationReason.AGENT_UNAVAILABLE
+
+为什么必须留 V2（不是"看着像没想清楚"）：
+- LangGraph + Checkpointer 本身是新增失败面——2026-10-22 实测：容器 sqlite
+  残留 checkpoint 触发错误 resume，退款流直接报错。这一类故障只有第 2 级
+  （不碰图引擎的 V2）能兜住；删 V2 意味着图一挂退款就只剩转人工。
+- 开关语义：USE_LANGGRAPH_REFUND=false 时 V2 是唯一退款引擎（老部署兼容），
+  不是"没得退"。
+
+的退役条件（写死，防止永久双轨）：
+- 观察指标：metrics v3_engine="v2" 计数（M8 看板）——图异常兜底每次进 V2 都会计数
+- 删除条件：连续一个迭代周期（2 周）v2 兜底零命中 + 图内异常 0 次，
+  方可删除本函数 + refund_flow.py 保险丝 + escalation agent_unavailable 链路
+  + 对应测试（test_synthesizer_refund.TestFallback 等）。在那之前保留。
+
+职责边界：
+- 不构造 prompt（委托 prompt_assembler）
+- 不做 LLM 流式（委托 stream_dispatcher；V3 LangGraph 自身处理 token 输出）
+- 不做 intent 分派（分派决策在 agents/experts.RefundAgent，M21 收口）
+
+2026-07-18 改造：fetch_order 阶段接入 OrderContextResolver 自动解析
+- 真实业务场景：顾客不报订单号，CS 用系统查
+- 1 单 → DIRECT_ANSWER（自动用，无歧义）
+- N 单 → SHOW_PICKER（yield meta.card 让前端 OrderCard list 渲染）
+- 0 单 → ASK_LOGIN_OR_LIST
+- 取代旧的"请提供订单号"prompt；M9.5 防串单通过 Resolver 0/1/N 决策兜底
+
+拆分原因：orchestrator.py 缩到 ≤ 350 行要求；refund 两条路径合 195 行，可下沉到本模块。
+"""
+import logging
+from typing import Any, Generator, Optional, Tuple
+
+from app.core.config import settings
+from app.services.context.context_service import ConversationContext
+from app.services.context.order_context_resolver import (
+    OrderResolverAction,
+    get_order_context_resolver,
+)
+from app.core.runtime_log import log_event  # 全链路日志
+
+from app.services.escalation_service import (
+    EscalationReason,
+    get_escalation_service,
+)
+from app.services.metrics import metrics  # noqa: F401  （保留以便后续加埋点）
+from app.services.order_service import OrderService
+from app.services.refund_graph import refund_graph_app  # LangGraph 版（RefundFlow 内部使用）
+from app.services.refund_service import RefundService
+from app.services.session_service import ANONYMOUS_USER_ID
+
+from app.services.chat import prompt_assembler, stream_dispatcher
+
+# Synthesizer._build_order_card_payload 是静态方法（跨模块纯函数）
+# 用 lazy import 避免 refund_handler ↔ orchestrator 循环导入
+def _build_card(result, density: str = "list", reason: str = "disambiguate") -> dict:
+    """lazy import wrapper for orchestrator.Synthesizer._build_order_card_payload"""
+    from app.services.chat.orchestrator import Synthesizer
+    return Synthesizer._build_order_card_payload(result, density=density, reason=reason)
+
+
+def _yield_handoff(
+    reason: EscalationReason,
+    user_id: int,
+    history: Optional[list[dict]],
+    intent_result: Optional[dict],
+    failure_context: Optional[dict] = None,
+) -> Generator[Tuple[str, Any], None, None]:
+    """yield 转人工事件（meta.handoff + token + done）
+
+    与 refund_flow._yield_handoff 逻辑对齐。
+    灰度开关 ENABLE_ESCALATION_HANDOFF=False 时降级为"系统繁忙"文本。
+    """
+    if not settings.ENABLE_ESCALATION_HANDOFF:
+        yield ("meta", {
+            # meta.intent 仍 = primary（向后兼容，前端只读 string）
+            "intent": intent_result.get("primary", intent_result.get("intent", "refund_query")) if intent_result else "refund_query",
+            "entities": intent_result.get("entities", {}) if intent_result else {},
+            "contexts": [],
+            "scores": [],
+            "v3_engine": "escalation_disabled",
+        })
+        yield from stream_dispatcher.stream_simple("系统繁忙，请稍后再试或联系人工客服。")
+        yield ("done", {"answer": ""})
+        return
+
+    escalation = get_escalation_service()
+    payload = escalation.handoff(
+        reason=reason,
+        user_id=user_id,
+        history=history,
+        intent_result=intent_result,
+        failure_context=failure_context,
+    )
+    yield ("meta", {
+        # meta.intent 仍 = primary（向后兼容，前端只读 string）
+        "intent": intent_result.get("primary", intent_result.get("intent", "refund_query")) if intent_result else "refund_query",
+        "entities": intent_result.get("entities", {}) if intent_result else {},
+        "contexts": [],
+        "scores": [],
+        "v3_engine": "escalation",
+        "handoff": payload.to_dict(),
+    })
+    yield from stream_dispatcher.stream_simple(
+        f"{payload.reason_label}（工单号 {payload.handoff_id}），人工客服会尽快联系您～"
+    )
+    yield ("done", {"answer": ""})
+
+logger = logging.getLogger(__name__)
+
+
+def handle_refund_v2(
+    query: str, user_id: int, intent_result: dict,
+    order_no: Optional[str] = None,
+    context_block: str = "",
+    secondary_intent_block: str = "",  # 多意图 secondary 提示
+) -> Generator[Tuple[str, Any], None, None]:
+    """refund_query 降级引擎（V2.x）：调 RefundService（复合 tool + policy）
+
+    .. deprecated:: 语义已由 V21 收口取代——不再是"待清理的临时双轨"，
+        而是**退款降级阶梯第 2 级**（见模块 docstring 的完整契约）。
+        仅在两种情况下进入本函数：
+        ① USE_LANGGRAPH_REFUND=false（老部署兼容，V2 是唯一退款引擎）；
+        ② RefundFlow 图引擎异常 → refund_flow.py 保险丝接管（每次计数
+        metrics v3_engine="v2"）。图引擎稳定运行一个迭代周期零兜底后，
+        按模块 docstring 的退役条件整体下线。
+    """
+    # 全链路日志：HANDLE_REFUND 入口
+    log_event("HANDLE_REFUND", "INFO", str(user_id), str(user_id),
+              f"V2 ENTER query={query[:80]} order_no={order_no} anonymous={user_id==ANONYMOUS_USER_ID}",
+              version="v2", query=query[:200], order_no=order_no,
+              anonymous=user_id == ANONYMOUS_USER_ID)
+
+    entities = intent_result["entities"]
+    # 优先用 context 传来的 order_no（用户从订单卡片跳转退款）
+    effective_order_no = order_no or entities.get("order_no")
+
+    if user_id == ANONYMOUS_USER_ID:
+        yield ("meta", {
+            "intent": "refund_query",
+            "entities": entities,
+            "contexts": [],
+            "scores": [],
+        })
+        yield from stream_dispatcher.stream_simple(prompt_assembler.NO_LOGIN_PROMPT)
+        return
+
+    # 无 order_no：走 Resolver 自动解析（与 V3/RefundFlow 对齐；修复 M9.5 buggy auto-fallback）
+    # 旧逻辑：取最近一笔订单（无视用户实际订单数，可能猜错订单导致 LLM 串单）
+    # 新逻辑：走 Resolver 0/1/N 决策（1 单自动用，N 单 picker，0 单告知）
+    if not effective_order_no:
+        resolver = get_order_context_resolver()
+        ctx = ConversationContext(session_id="", user_id=user_id)
+        result = resolver.resolve(user_id, "refund_query", entities, ctx)
+
+        if result.action == OrderResolverAction.DIRECT_ANSWER and result.effective_order_no:
+            effective_order_no = result.effective_order_no
+            # 继续走 RefundService.check_refundable_with_policy
+
+        elif result.action == OrderResolverAction.SHOW_PICKER:
+            card = _build_card(result, density="list", reason="disambiguate")
+            yield ("meta", {
+                "intent": "refund_query",
+                "entities": entities,
+                "contexts": [],
+                "scores": [],
+                "card": card if settings.SSE_CARD_V2 else None,
+                "resolver_action": result.action.value,
+                "resolver_reason": result.reason,
+                "total_orders": result.total_orders,
+                "truncated": result.truncated,
+            })
+            text = (
+                f"您有 {result.total_orders} 个订单，请选择要处理的订单："
+                if not result.truncated
+                else f"您最近订单较多（{result.total_orders} 个），以下仅展示前 {len(card['items'])} 个："
+            )
+            yield from stream_dispatcher.stream_simple(text)
+            return
+
+        elif result.action == OrderResolverAction.ASK_LOGIN_OR_LIST:
+            yield ("meta", {
+                "intent": "refund_query",
+                "entities": entities,
+                "contexts": [],
+                "scores": [],
+                "resolver_action": result.action.value,
+                "total_orders": 0,
+            })
+            yield from stream_dispatcher.stream_simple("您当前没有订单，暂时无法处理哦～")
+            return
+
+        else:
+            # NOT_FOUND / ASK_LOGIN / 兜底
+            yield from stream_dispatcher.stream_simple(
+                "查询失败，请稍后再试或联系客服。" if result.action == OrderResolverAction.NOT_FOUND
+                else prompt_assembler.NO_LOGIN_PROMPT
+            )
+            return
+
+    result = RefundService.check_refundable_with_policy(user_id, effective_order_no, query)
+    # 全链路日志：refund 工具调用结果
+    log_event("REFUND_TOOL", "INFO", str(user_id), str(user_id),
+              f"V2 tool_result refundable={result.get('tool_result',{}).get('refundable')}",
+              refundable=result.get('tool_result',{}).get('refundable'),
+              order_no=effective_order_no)
+    tool_block = prompt_assembler._format_tool_result("refund_query", result)
+    policy_docs = result.get("policy_docs", [])
+    # 全链路日志：refund 政策检索
+    log_event("RAG_RETRIEVE", "INFO", str(user_id), str(user_id),
+              f"refund policy hits={len(policy_docs)}",
+              hits=len(policy_docs), query=query[:200])
+    policy_block = prompt_assembler._format_policy_docs(policy_docs)
+
+    # 把退款判断 + 政策命中一并暴露给 meta
+    contexts, scores = prompt_assembler._build_meta_contexts(policy_docs=policy_docs)
+    meta = {
+        "intent": "refund_query",
+        "entities": entities,
+        "contexts": contexts,
+        "scores": scores,
+        "order_no": effective_order_no,
+        "refundable": result.get("tool_result", {}).get("refundable"),
+        "policy_hits": len(policy_docs),
+    }
+    yield ("meta", meta)
+
+    prompt = prompt_assembler._build_chat_prompt(
+        intent="refund_query",
+        tool_block=tool_block,
+        policy_block=policy_block,
+        product_block="",
+        history_block="",
+        query=query,
+        context_block=context_block,
+        secondary_intent_block=secondary_intent_block,  # V12
+    )
+    # 全链路日志：refund_query LLM_PROMPT (v2)
+    try:
+        from app.services.chat.prompt_assembler import SYSTEM_PROMPT_BASE
+        _full_system = (SYSTEM_PROMPT_BASE + context_block) if context_block else SYSTEM_PROMPT_BASE
+        log_event("LLM_PROMPT", "INFO", str(user_id), str(user_id),
+                  f"refund v2 system_len={len(_full_system)} user_len={len(query)}",
+                  system_prompt=_full_system[:3000] + ("...(截断)" if len(_full_system) > 3000 else ""),
+                  user_message=query, version="v2",
+                  chars_system=len(_full_system))
+    except Exception:
+        pass
+    yield from stream_dispatcher.stream_llm(prompt, context_block=context_block)
+
+
+def handle_refund_v3(
+    query: str, user_id: int, intent_result: dict,
+    order_no: Optional[str] = None,
+    context_block: str = "",
+    history: Optional[list[dict]] = None,
+    secondary_intent_block: str = "",  # 路径暂不注入（RefundFlow 改造留 ）
+    session_id: Optional[str] = None,  # 透传给 RefundFlow 做 checkpoint thread
+) -> Generator[Tuple[str, Any], None, None]:
+    """refund_query V3：委托 RefundFlow.run()（M14 V3 调整）。
+
+    历史：
+    - 原 V3 实现：直接调 refund_graph_app.stream()，yield judge / fetch_policy / synthesize
+    - 调整后：judge 已移到 RefundFlow.run()，LangGraph 4 节点 decide / fetch_policy / synthesize / escalate
+    - 为消除重复 + 单一入口，handle_refund_v3 委托 RefundFlow.run()
+
+    SSE 协议（与原 V3 一致）：
+    - decide Node → yield meta（含 refundable / reason / status_zh / days_since_order / decision）
+    - fetch_policy Node → yield meta（含 policy_hits）
+    - synthesize Node → yield token（final_answer）
+    - escalate Node → yield meta.handoff + 转人工 token
+    - done 事件由 RefundFlow 自动 yield
+    """
+    # 全链路日志：HANDLE_REFUND 入口 (V3 委托给 RefundFlow)
+    log_event("HANDLE_REFUND", "INFO", str(user_id), str(user_id),
+              f"V3 ENTER query={query[:80]} order_no={order_no}",
+              version="v3", query=query[:200], order_no=order_no,
+              anonymous=user_id == ANONYMOUS_USER_ID)
+
+    # lazy import 避免 refund_flow ↔ refund_handler 循环导入
+    # （refund_flow 顶层 import handle_refund_v2 作 V2 fallback 保险丝）
+    from app.services.business_flow.refund_flow import RefundFlow
+
+    flow = RefundFlow(
+        query=query,
+        user_id=user_id,
+        intent_result=intent_result,
+        order_no=order_no,
+        context_block=context_block,
+        history=history,
+        session_id=session_id,
+    )
+    yield from flow.run()

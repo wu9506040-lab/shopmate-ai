@@ -1,0 +1,36 @@
+# 客服主提示词版本清单（manifest 模式）
+# - default_version: 当前激活的版本号
+# - versions: 版本字典，每个版本指向一个内容文件
+#   - file: 相对 prompts/ 目录的 YAML 文件路径
+#   - stable: 是否为稳定版（标识用，不影响加载逻辑）
+#   - note: 版本说明（人类可读）
+# 其余提示词文件使用 {content: ...} 格式，加载器按兼容模式处理。
+
+default_version: v4
+versions:
+  v1:
+    file: agent_v1.yaml
+    stable: true
+    note: |
+      客服主提示词稳定版，使用稳定口径。
+  v2:
+    file: agent_v2.yaml
+    stable: false
+    note: |
+      实验版（仅作机制示范）：调整引用标签示例 + 增加礼貌前缀。
+      实际启用需配合业务灰度策略（后续阶段）。
+  v3:
+    file: agent_v3.yaml
+    stable: true
+    note: |
+      在 v1 基础上补「读表格类资料的口径」：先念行列表头再取值、
+      交界档位必须说明取哪一档、一题只给一个推荐码。
+      起因是真模型评测 P01 依据引错行列（把 55-65kg 格的值说成 M）。
+  v4:
+    file: agent_v4.yaml
+    stable: true
+    note: |
+      读表口径升级：身高维/体重维分别查一次，胖按体重定码、瘦按身高定码，
+      并禁止跨行取数（引用某码必须照抄该码那一行）；超范围不许硬凑；
+      收尾固定补一句「7 天无理由 + 换码商家承担运费 + 赠运费险，可拍回去试穿」。
+      起因：170cm/190斤 答 3XL（应 4XL），且把 4XL 的身高范围说成 3XL 的。

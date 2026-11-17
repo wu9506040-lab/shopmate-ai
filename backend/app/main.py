@@ -1,0 +1,339 @@
+"""
+智能客服 Agent 系统 - FastAPI 后端入口
+
+结构化日志 + Request ID 中间件 + /metrics 端点
+"""
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.admin import router as admin_router
+from app.api.admin_analytics import router as admin_analytics_router  # P4-2 admin 运营聚合
+from app.api.admin_conversations import router as admin_conversations_router  # P4-1 admin 全局会话查询
+from app.api.admin_qa import router as admin_qa_router  # QA 质检（规则全量 + 抽样打分）
+from app.api.admin_handoff import router as admin_handoff_router
+from app.api.xianyu_admin import router as xianyu_admin_router  # 人工介入工单坐席工作台
+from app.api.ratings import router as ratings_router  # WP1 回答评价（CSAT 采集）
+from app.api.badcase_admin import router as badcase_admin_router  # badcase 池审核面
+from app.api.confirm_ticket import router as confirm_ticket_router  # human-in-the-loop 高风险工具护栏
+from app.api.auth import router as auth_router
+from app.api.me_profile import router as me_profile_router  # 用户自己的长期记忆：查看/删除
+from app.api.channels import router as channels_router  # S14 ChannelAdapter Webhook
+from app.api.channel_accounts import router as channel_accounts_router  # 多渠道账号管理面
+from app.api.chat import router as chat_router
+from app.api.conversations import router as conversations_router  # §12 会话历史读取层
+from app.api.intent import router as intent_router  # 意图分类
+from app.api.middleware import RateLimitMiddleware, RequestIdMiddleware, ResponseHeaderMiddleware  # + P0-I
+from app.api.public import router as public_router  # 公开 demo 站点入口（M13 cloud）
+from app.api.shop import router as shop_router  # 前端商品橱窗 + 我的订单（M9）
+from app.clients.mysql_client import close_engine, get_engine
+from app.clients.vector_db import vector_db_breaker  # metrics 用
+from app.core.config import settings
+from app.core.logging import setup_logging  # M8
+from app.models import Base  # 触发 ORM 注册（确保 create_all 找到所有表）
+
+# =============================================================
+# 日志配置（结构化 JSON / text 双模式）
+# =============================================================
+# dev 环境用 text（人类可读），prod 用 json（日志聚合系统）
+LOG_FORMAT = "json" if settings.APP_ENV in ("prod", "production") else "text"
+setup_logging(level=settings.LOG_LEVEL, log_format=LOG_FORMAT)
+logger = logging.getLogger(__name__)
+
+# =============================================================
+# 应用
+# =============================================================
+app = FastAPI(
+    title="智能客服 API",
+    version="0.2.0",
+    description="RAG + Agent 智能客服后端 - 含用户认证",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS（必须显式白名单，禁止 "*" + allow_credentials 组合）
+# "*" + credentials 在浏览器会被拒绝（浏览器安全策略），等于埋雷
+_cors_origins = [
+    o.strip() for o in settings.CORS_ALLOWED_ORIGINS.split(",") if o.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,  # 必须 True，cookie 才能跨域
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =============================================================
+# 限流中间件（防 /chat / 登录被刷）
+# 注意：CORS 之后注册（外层先于内层），让 OPTIONS 预检不受限流影响
+# =============================================================
+app.add_middleware(RateLimitMiddleware)
+
+# =============================================================
+# 中间件（必须在 CORS 之后注册 — FastAPI 中间件执行顺序是 LIFO）
+# =============================================================
+# 注意：ResponseHeaderMiddleware 先注册（外层），RequestIdMiddleware 后注册（内层）
+# 实际请求流向：client → CORS → RateLimit → ResponseHeader → RequestId → router
+# 实际响应流向：router → RequestId（设 ContextVar）→ ResponseHeader（读 ContextVar 写头）
+app.add_middleware(ResponseHeaderMiddleware)
+app.add_middleware(RequestIdMiddleware)
+
+
+# =============================================================
+# 路由
+# =============================================================
+@app.get("/")
+async def root():
+    """根端点 - 服务信息"""
+    return {
+        "service": "customer-service-api",
+        "version": "0.2.0",
+        "env": settings.APP_ENV,
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+@app.get("/health")
+async def health():
+    """
+    健康检查端点（含 Redis / Vector / MySQL 状态）
+
+    各组件独立 try/except，任一挂掉不影响其他检测。
+    整体状态规则：
+        - 全部 ok → "ok"
+        - 任意组件 down → "degraded"
+    """
+    from sqlalchemy import text
+
+    from app.clients.mysql_client import get_engine
+    from app.clients.vector_db import health_check as vdb_health
+    from app.clients.redis_client import get_client as redis_get
+
+    components: dict = {}
+
+    # MySQL（同步 SQLAlchemy，FastAPI 自动放 default executor）
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        components["mysql"] = {"status": "ok"}
+    except Exception as e:
+        components["mysql"] = {"status": "down", "error": str(e)[:100]}
+
+    # Redis
+    try:
+        redis_get().ping()
+        components["redis"] = {"status": "ok"}
+    except Exception as e:
+        components["redis"] = {"status": "down", "error": str(e)[:100]}
+
+    # Vector
+    try:
+        _vh = vdb_health()
+        components["milvus"] = {"status": "ok" if _vh["ok"] else "down",
+                                **({"error": _vh["error"]} if _vh.get("error") else {})}
+    except Exception as e:
+        components["milvus"] = {"status": "down", "error": str(e)[:100]}
+
+    # 注入断路器状态（M8）— 独立字段，不参与 overall 判定
+    circuit_breaker = {
+        "vector_db": vector_db_breaker.stats(),
+    }
+
+    # 只统计 mysql / redis / vector 三个核心组件，circuit_breaker 是诊断信息
+    overall = (
+        "ok"
+        if all(c["status"] == "ok" for c in (components["mysql"], components["redis"], components["milvus"]))
+        else "degraded"
+    )
+    return {
+        "status": overall,
+        "env": settings.APP_ENV,
+        "version": "0.2.0",
+        "components": components,
+        "circuit_breaker": circuit_breaker,
+    }
+
+
+# =============================================================
+# 路由注册（api/ 子模块）
+# P4（三部分架构：前端 | Java 中台 | Python AI）：
+# PLATFORM_AI_ONLY=True 时只注册 AI 内核路由 —— Python 收敛为纯 AI 服务，
+# 平台业务路由由 Java 中台提供。默认 False 保持全量（直连部署/历史测试兼容），
+# 功能开关可随时关闭。
+# =============================================================
+_AI_ONLY = settings.PLATFORM_AI_ONLY
+
+# —— AI 内核路由（任何模式都注册）——
+app.include_router(chat_router)          # SSE 问答主入口
+app.include_router(intent_router)        # 意图分类调试端点（AI 能力自检）
+app.include_router(channels_router)      # 渠道 webhook → 问答管线
+# 多渠道账号管理面：Java 中台尚未提供该管理面，两种模式都由 Python 提供，
+# 避免 PLATFORM_AI_ONLY 开启后管理台「账号管理」直接 404。
+app.include_router(channel_accounts_router)
+app.include_router(admin_router)         # 知识库入库/管理（RAG 数据面）
+
+if not _AI_ONLY:
+    # —— 平台业务路由（AI-only 模式下由 Java 中台接管）——
+    app.include_router(admin_analytics_router)  # P4-2 admin 运营聚合
+    app.include_router(admin_conversations_router)  # P4-1 admin 全局会话查询
+    app.include_router(admin_handoff_router)  # 人工介入工单坐席工作台
+    app.include_router(xianyu_admin_router)  # 闲鱼人工后台（实时会话/直发/接管）
+    app.include_router(ratings_router)  # WP1 CSAT 评价入口
+    app.include_router(badcase_admin_router)  # badcase 池审核面
+    app.include_router(admin_qa_router)  # QA 质检：跑批/列表/看板/转 badcase
+    app.include_router(confirm_ticket_router)  # human-in-the-loop 高风险工具护栏
+    app.include_router(auth_router)
+    app.include_router(me_profile_router)
+    app.include_router(conversations_router)  # §12
+    app.include_router(public_router)  # cloud：公开 demo 入口
+    app.include_router(shop_router)  # 前端商品橱窗 + 我的订单
+    logger.info("路由注册：全量模式（PLATFORM_AI_ONLY=false）")
+else:
+    logger.info(
+        "路由注册：AI-only 模式（PLATFORM_AI_ONLY=true）——"
+        "平台业务路由由 Java 中台接管，本服务拒绝平台类请求"
+    )
+
+
+# =============================================================
+# /metrics 端点（业务指标 JSON 快照）
+# =============================================================
+@app.get(
+    "/api/metrics",
+    summary="业务指标快照（M8）",
+    description="返回 chat / rag / embedding / hit@K 等指标的 JSON 快照。不引入 Prometheus，纯内存实现。",
+)
+async def metrics_endpoint():
+    """
+    业务指标端点
+
+    返回字段：
+        uptime_seconds    - 服务启动时长
+        chat              - chat 调用数 / 意图分布 / 延迟分位数 / token 总量
+        rag               - Vector 搜索成功 / 降级 / 错误计数
+        embedding         - embedding 调用 / 重试 / 错误计数
+        circuit_breaker   - 断路器状态
+        hit_at_k          - 实时 hit@K（最近 100 次 RAG 检索窗口）
+    """
+    from app.services.metrics import metrics as metrics_singleton
+    return metrics_singleton.snapshot(
+        circuit_breaker_stats={"vector_db": vector_db_breaker.stats()}
+    )
+
+
+# =============================================================
+# 启动事件
+# =============================================================
+@app.on_event("startup")
+async def startup_event():
+    # human-in-the-loop）：注册高风险工具执行器（业务模块启动期填表）
+    # 当前演示档：refund_execute 走真 OrderLifecycle.refund_order；
+    # 未来 FC 灰度开 + 上线（refund_execute / send_email / create_order 等），
+    # 同样按此模式注册即可——confirmation 入口一行不改。
+    from app.services.confirm_ticket_service import register_executor
+    from app.services.order_lifecycle import OrderLifecycle
+
+    def _refund_execute(args: dict, user_id: int) -> dict:
+        return OrderLifecycle.refund_order(
+            user_id=user_id,
+            order_no=args["order_no"],
+            reason=args.get("reason", "用户申请退款"),
+            remark=args.get("remark"),
+            role="user",
+        )
+
+    register_executor("refund_execute", _refund_execute)
+    logger.info("=" * 60)
+    logger.info("智能客服 API 启动")
+    logger.info(f"环境: {settings.APP_ENV}")
+    logger.info(f"日志级别: {settings.LOG_LEVEL}")
+    logger.info(f"模型: {settings.QWEN_MODEL}")
+    logger.info(f"千问 BaseURL: {settings.DASHSCOPE_BASE_URL}")
+    if settings.QWEN_API_KEY and not settings.QWEN_API_KEY.startswith("sk-put-your-real"):
+        logger.info("QWEN_API_KEY: 已配置（脱敏显示）")
+    else:
+        logger.warning("QWEN_API_KEY: 未配置或为占位符（/chat 端点将返回 500）")
+
+    # 初始化 MySQL（建表兜底）
+    try:
+        engine = get_engine()
+        Base.metadata.create_all(bind=engine)
+        logger.info("MySQL: 连接 + create_all 完成")
+    except Exception as e:
+        logger.exception(f"MySQL 初始化失败: {e}")
+        # 不 raise，让 FastAPI 启动（DB 暂时不可用不会让 API 完全挂掉）
+
+    # Cookie 配置提示
+    logger.info(
+        f"Cookie: name={settings.COOKIE_NAME}, "
+        f"secure={settings.COOKIE_SECURE}, "
+        f"samesite={settings.COOKIE_SAMESITE}"
+    )
+
+    # （1.7）：feature flag 真值自报——审计教训：代码默认 / .env / compose
+    # 三源漂移（如 USE_LANGGRAPH_REFUND 代码 False 容器 true），此前只能人肉
+    # 翻三个文件才知道"线上到底开着什么"。启动日志一屏看全生效值。
+    _flags = {
+        "USE_LANGGRAPH_REFUND": settings.USE_LANGGRAPH_REFUND,
+        "ENABLE_BUSINESS_FLOW": settings.ENABLE_BUSINESS_FLOW,
+        "ENABLE_ORDER_RESOLVER": settings.ENABLE_ORDER_RESOLVER,
+        "ENABLE_ESCALATION_HANDOFF": settings.ENABLE_ESCALATION_HANDOFF,
+        "ENABLE_AGENT_FC": settings.ENABLE_AGENT_FC,
+        "USE_HYBRID_BM25": settings.USE_HYBRID_BM25,
+        "USE_RERANK": settings.USE_RERANK,
+        "ENABLE_MULTI_QUERY": settings.ENABLE_MULTI_QUERY,
+        "ENABLE_USER_PROFILE": settings.ENABLE_USER_PROFILE,
+        # 请求级预算——和上面业务开关平级，启动日志一眼看生效值
+        "CHAT_DEADLINE_SECONDS": settings.CHAT_DEADLINE_SECONDS,
+        "LLM_CALL_TIMEOUT": settings.LLM_CALL_TIMEOUT,
+        "LLM_SDK_MAX_RETRIES": settings.LLM_SDK_MAX_RETRIES,
+        "LLM_SEMAPHORE_SIZE": settings.LLM_SEMAPHORE_SIZE,
+        "ENABLE_CONTEXT_STORE": settings.ENABLE_CONTEXT_STORE,
+        "SSE_CARD_V2": settings.SSE_CARD_V2,
+        "RAG_CHUNK_STRATEGY": settings.RAG_CHUNK_STRATEGY,
+    }
+    logger.info("feature flags: " + "  ".join(f"{k}={v}" for k, v in _flags.items()))
+
+    # （1.7）：模型名形状体检——日期快照会被上游退役（2026-10-10 实锤：
+    # qwen-plus-2025-07-28 下架 404，被 rerank 静默降级吃成"数字正常、整级空转"）
+    import re as _re
+    if _re.search(r"-\d{4}-\d{2}-\d{2}$", settings.QWEN_MODEL or ""):
+        logger.warning(
+            f"QWEN_MODEL={settings.QWEN_MODEL} 是带日期快照版本，存在被上游退役风险，"
+            "建议改用通用别名（qwen-plus / qwen-turbo）"
+        )
+
+    # （1.7）：模型连通性后台探活（不阻塞启动；失败只显形告警。
+    # 此前 401/404 类配置错误要等第一个用户请求才暴露）
+    import threading
+
+    def _probe_llm() -> None:
+        try:
+            from app.core import qwen as _q
+            _q.chat([{"role": "user", "content": "ping"}], max_tokens=8)
+            logger.info(f"model probe OK: {settings.QWEN_MODEL}")
+        except Exception as e:
+            logger.error(
+                f"model probe FAILED: {settings.QWEN_MODEL} -> "
+                f"{type(e).__name__}: {str(e)[:120]}"
+            )
+
+    threading.Thread(target=_probe_llm, daemon=True, name="llm-probe").start()
+    logger.info("=" * 60)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """优雅关闭：释放连接池"""
+    close_engine()
+    logger.info("MySQL engine 已关闭")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)

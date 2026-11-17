@@ -1,0 +1,189 @@
+// =============================================================
+// Vue Router 4 - 多页路由（M9 调整：从单 ChatPage 升级到产品级 SPA）
+// 路由表：
+//   /login       登录 + 注册（双 tab）
+//   /shop        商品橱窗（公开）
+//   /shop/:sku   商品详情（公开）
+//   /chat        对话页（需登录）
+//   /chat/:sessionId 恢复指定会话（需登录）
+//   /profile     个人中心（需登录）
+// 路由守卫：
+//   - meta.requiresAuth 路由未登录跳 /login
+//   - meta.guestOnly 路由已登录跳 /shop（如 /login）
+// =============================================================
+import {
+  createRouter,
+  createWebHistory,
+  type RouteLocationNormalized,
+  type RouteRecordRaw,
+} from 'vue-router';
+
+import { getMe, isAuthed } from '../api';
+import type { User } from '../types';
+
+const routes: RouteRecordRaw[] = [
+  // 默认重定向：打开就是商城（/shop 是公开页，未登录也能逛，问客服时才要求登录）
+  {
+    path: '/',
+    redirect: '/shop',
+  },
+
+  // 登录 + 注册（去掉 guestOnly，已登录访问显示"已登录为 xxx"提示，让用户能切换账号）
+  {
+    path: '/login',
+    name: 'login',
+    component: () => import('../views/LoginPage.vue'),
+    meta: { title: '登录 / 注册' },
+  },
+
+  // 商品橱窗（公开，但需登录才能问客服）
+  {
+    path: '/shop',
+    name: 'shop',
+    component: () => import('../views/ShopPage.vue'),
+    meta: { title: '商品橱窗' },
+  },
+  {
+    path: '/shop/:sku',
+    name: 'product-detail',
+    component: () => import('../views/ProductDetail.vue'),
+    meta: { title: '商品详情' },
+  },
+
+  // 对话（需登录）
+  {
+    path: '/chat',
+    name: 'chat',
+    component: () => import('../views/ChatPage.vue'),
+    meta: { title: '智能客服', requiresAuth: true },
+  },
+  {
+    path: '/chat/:sessionId',
+    name: 'chat-session',
+    component: () => import('../views/ChatPage.vue'),
+    meta: { title: '智能客服', requiresAuth: true },
+  },
+
+  // 管理台专属登录页（顶层路由，全屏渲染不带侧边栏；静态路径优先匹配）
+  {
+    path: '/admin/login',
+    name: 'admin-login',
+    component: () => import('../views/AdminLogin.vue'),
+    meta: { title: '管理后台登录', requiresAuth: false, requiresAdmin: false },
+  },
+
+  // 管理后台（Ant Design Pro 风格布局：深色侧边栏 + 顶栏）
+  {
+    path: '/admin',
+    component: () => import('../components/AdminLayout.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true },
+    children: [
+      {
+        path: 'board',
+        name: 'admin-board',
+        component: () => import('../views/DataBoard.vue'),
+        meta: { title: '数据看板', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'accounts',
+        name: 'admin-accounts',
+        component: () => import('../views/AccountsAdmin.vue'),
+        meta: { title: '账号管理', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'analytics',
+        name: 'admin-analytics',
+        component: () => import('../views/AdminAnalytics.vue'),
+        meta: { title: '运营数据驾驶舱', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'kpi',
+        name: 'admin-kpi',
+        component: () => import('../views/AdminKpi.vue'),
+        meta: { title: '业务 KPI 大盘', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'qa',
+        name: 'admin-qa',
+        component: () => import('../views/QaBoard.vue'),
+        meta: { title: '质检（QA）', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'xianyu',
+        name: 'admin-xianyu',
+        component: () => import('../views/XianyuWorkbench.vue'),
+        meta: { title: '店铺会话后台', requiresAuth: true, requiresAdmin: true },
+      },
+      {
+        path: 'handoff',
+        name: 'admin-handoff',
+        component: () => import('../views/HandoffWorkbench.vue'),
+        meta: { title: '人工介入工作台', requiresAuth: true, requiresAdmin: true },
+      },
+    ],
+  },
+
+  // 个人中心（需登录）
+  {
+    path: '/profile',
+    name: 'profile',
+    component: () => import('../views/ProfilePage.vue'),
+    meta: { title: '个人中心', requiresAuth: true },
+  },
+
+  // 404 fallback
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/',
+  },
+];
+
+export const router = createRouter({
+  history: createWebHistory(),
+  routes,
+});
+
+// =============================================================
+// 路由守卫：未登录拦截 + 已登录重定向
+// =============================================================
+router.beforeEach(async (to: RouteLocationNormalized) => {
+  // 首次加载时探测登录态（httpOnly Cookie 不可被 document.cookie 读取，必须调 API）
+  let resolvedUser: User | null = null;
+  if (isAuthed.value === null) {
+    resolvedUser = await getMe();
+  }
+
+  // /admin 区域完全隔离——未登录/非管理员一律回管理台专属登录页
+  if (to.path.startsWith('/admin') && to.name !== 'admin-login') {
+    if (to.meta.requiresAuth && !isAuthed.value) {
+      return { name: 'admin-login', query: { redirect: to.fullPath } };
+    }
+    if (to.meta.requiresAdmin) {
+      resolvedUser = resolvedUser ?? await getMe();
+      if (!resolvedUser || resolvedUser.role !== 'admin') {
+        return { name: 'admin-login' };
+      }
+    }
+  }
+  if (to.meta.requiresAuth && !isAuthed.value) {
+    return { name: 'login', query: { redirect: to.fullPath } };
+  }
+  if (to.meta.requiresAdmin) {
+    resolvedUser = resolvedUser ?? await getMe();
+    if (!resolvedUser || resolvedUser.role !== 'admin') {
+      return { name: 'shop' };
+    }
+  }
+  // guestOnly 已移除（M13）：/login 不再重定向已登录用户，允许"切换账号"
+  if (to.meta.guestOnly && isAuthed.value) {
+    return { name: 'shop' };
+  }
+
+  // 标题
+  if (to.meta.title) {
+    document.title = `${to.meta.title} - 猫与小鼠客服`;
+  }
+  return true;
+});
+
+export default router;

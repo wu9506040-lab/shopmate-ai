@@ -1,0 +1,10 @@
+# 闲鱼场景化话术清单
+
+default_version: v1
+versions:
+  v1:
+    presale: presale.yaml      # 售前话术
+    in_sale: in_sale.yaml      # 售中话术
+    after_sale: after_sale.yaml  # 售后话术
+    note: |
+      售前主打成色如实说明与议价差异化，售中物流透明，售后不含退款。

@@ -1,0 +1,212 @@
+# =============================================================
+# Python
+# =============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# =============================================================
+# Node / Vue
+# =============================================================
+node_modules/
+dist/
+.vite/
+.nuxt/
+.output/
+coverage/
+.npm/
+.yarn/
+.pnpm-store/
+.pnp.*
+*.local
+
+# =============================================================
+# 环境变量 - 保护敏感配置
+# 公开仓库：忽略所有真实环境文件，仅保留 .example 模板
+# .env.example 故意保留（模板，无密钥）
+# =============================================================
+.env
+.env.local
+.env.*.local
+.env.production
+.env.prod
+.env.staging
+.env.dev
+.env.development
+.env.test
+.env.layout
+deploy/.env.dev
+deploy/.env.dev.bak
+deploy/.env.prod
+deploy/.env.local
+# .env 的任意备份副本（手工改名备份常带真实密钥，最容易误提交）
+.env.bak*
+*.env.bak*
+backend/.env.bak*
+
+# =============================================================
+# IDE / 编辑器
+# =============================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================================================
+# 日志 / 临时
+# =============================================================
+*.log
+logs/
+tmp/
+temp/
+.cache/
+
+# =============================================================
+# 数据卷/构建产物（不进 Git）
+# =============================================================
+data/*
+# 例外：评测集与评测报告是资产，必须入库（V22 七维评测）
+!data/evalsets/
+!data/eval_seven_report.json
+volumes/
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# =============================================================
+# Windows 特有
+# =============================================================
+$RECYCLE.BIN/
+System Volume Information/
+*.lnk
+
+# =============================================================
+# Claude Code 项目级指令（本地保留，不上传公开仓库）
+# 大小写两种都要忽略（Windows Git init 会自动生成小写副本）
+# =============================================================
+*laude.md
+*LAUDE.md
+.claude/
+
+# cc-connect 飞书/IM 桥接工具配置（用户级 ~/.cc-connect/，万一误拷进项目兜底）
+# 包含 MiniMax API key + 飞书 App Secret；用 / 同步忽略目录内文件
+# 2026-07-15：M13 之后新增 cc-connect，本地持有
+# =============================================================
+.cc-connect/
+
+# =============================================================
+# WSL 探针脚本（机器相关，不进项目）
+# 实际文件在 scripts/archive/wsl-probes/（历史归档）
+# =============================================================
+check_specs.ps1
+check_wsl.ps1
+cpu_info.txt
+disk_space.txt
+feat_vmp.txt
+feat_wsl.txt
+free_ram.txt
+ram_info.txt
+ram_sticks.txt
+total_ram.txt
+wsl_*.txt
+scripts/archive/
+
+# =============================================================
+# 临时响应（API 测试输出，不进项目）
+# =============================================================
+chat_response.json
+
+# =============================================================
+# 测试 payload（手工调试产物，仅根目录限定，不进项目）
+# =============================================================
+/cookies.txt
+/tests/manual/screenshots/
+/chat_unauth.json
+/chat_v3_test.json
+/chat_v3_path1.json
+/login.json
+/register.json
+/test_chat_m8.json
+/test_chat_robustness.json
+/probe_refund.json
+/probe_normal.json
+
+# =============================================================
+# e2e 测试 Cookie（登录后动态生成，含 JWT）
+# 2026-06-28：从 git tracking 移除（原占位符 SECRET 下的 Cookie 已在 Gitee 公开过，新 SECRET 已轮换）
+# =============================================================
+deploy/tests/cookies.txt
+
+
+# =============================================================
+# 私人文档（简历/笔记/草稿，不上传公开仓库）
+# 必须用 /** 而不是 /，否则只忽略目录本身，文件会泄露到公开仓库
+# =============================================================
+docs/_private/**
+!/docs/_private/.gitkeep
+
+# =============================================================
+# 调试过程截图（bug 复现/audit 调试，不上传公开仓库）
+# =============================================================
+frontend/_screenshots/audit/
+frontend/_screenshots/bugrepro/
+frontend/_screenshots/manual/
+
+# =============================================================
+# 内部测试报告（idor / regression_m13 / 性能压测等，含漏洞细节 + 压测数据，不上传公开仓库）
+# 2026-07-05：所有 _report.json 不再 tracked，已 git rm --cached
+# 仅保留 frontend/_screenshots/walkthrough/ 下的 demo 截图 + 公开 walkthrough/report.json
+# =============================================================
+frontend/_screenshots/*_report.json
+
+# =============================================================
+# planning-with-files 临时文件（planning skill 本地 working memory，不进项目）
+# 2026-07-19：next_phase_plan_v11 规划期间自动生成，决策完应忽略避免污染工作树
+# =============================================================
+/task_plan.md
+/findings.md
+/progress.md
+
+# =============================================================
+# V18.2 敏感信息（多账号/通知配置含凭据，严禁入库）
+# =============================================================
+cookie.txt
+cookies/
+backend/config/accounts.json
+backend/config/notify.json
+backend/config/channel_accounts.json
+backend/config/credentials/
+.screenshots/
+deploy/.env.dev.bak-*
+kb_all.json
+kb_sample.json
+pt_one.json
+_research/
+*.log.pid
+
+# 本地运行时数据/日志（不入库）
+backend/data/
+backend/logs/
+
+# 工作区本地记忆（WorkBuddy 项目笔记，不进公开仓库）
+.workbuddy/

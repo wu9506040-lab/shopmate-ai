@@ -1,0 +1,62 @@
+-- H2 本地开发表结构（与 deploy/mysql/init/01_schema.sql 的 MySQL 版对齐，仅保留平台层用到的表）
+CREATE TABLE IF NOT EXISTS users (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  display_name VARCHAR(200),
+  email VARCHAR(200),
+  role VARCHAR(32) NOT NULL DEFAULT 'user',
+  status SMALLINT NOT NULL DEFAULT 1,
+  create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  deleted SMALLINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  session_id VARCHAR(64) NOT NULL UNIQUE,
+  user_id BIGINT NOT NULL,
+  title VARCHAR(200),
+  message_count INT DEFAULT 0,
+  first_query VARCHAR(500),
+  last_message_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  deleted SMALLINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS messages (  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  session_id VARCHAR(64) NOT NULL,
+  user_id BIGINT,
+  role VARCHAR(20) NOT NULL,
+  content TEXT,
+  contexts TEXT,
+  scores TEXT,
+  intent_snapshot TEXT,
+  token_count INT,
+  latency_ms INT,
+  create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  deleted SMALLINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS handoff_tickets (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  ticket_no VARCHAR(32) NOT NULL UNIQUE,
+  session_id VARCHAR(64) NOT NULL DEFAULT '',
+  user_id BIGINT NOT NULL,
+  reason VARCHAR(32) NOT NULL,
+  reason_detail VARCHAR(500),
+  category VARCHAR(64),
+  priority VARCHAR(8) NOT NULL DEFAULT 'P2',
+  matched_keyword VARCHAR(64),
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  assignee VARCHAR(64),
+  summary TEXT,
+  reply TEXT,
+  last_agent_reply_at TIMESTAMP,
+  auto_closed SMALLINT NOT NULL DEFAULT 0,
+  create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  deleted SMALLINT NOT NULL DEFAULT 0
+);

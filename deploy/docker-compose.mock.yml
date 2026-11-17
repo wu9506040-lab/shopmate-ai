@@ -1,0 +1,20 @@
+# =============================================================
+# Mock LLM 覆盖配置（不覆盖主 compose，按需叠加）
+#
+# 用途：真实大模型额度不足时，让 Python AI 服务把「生成」这一步
+#      指向本地 mock LLM（scripts/mock_llm_server.py）。
+#      意图识别 / RAG 检索 / 引用 / 落库全部真实运行。
+#
+# 启用：docker compose --env-file .env.dev \
+#         -f docker-compose.yml -f docker-compose.mock.yml up -d api
+# 关闭：去掉 -f docker-compose.mock.yml 重新 up 即可回到真实模型
+#
+# 前置：宿主机启动 python scripts/mock_llm_server.py（默认 18082）
+# =============================================================
+services:
+  api:
+    environment:
+      DASHSCOPE_BASE_URL: http://host.docker.internal:18082/v1
+      # 注意：EMBEDDING_* 不做覆盖 —— 向量检索仍走真实 embedding 服务
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

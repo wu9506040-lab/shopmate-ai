@@ -1,0 +1,814 @@
+<script setup lang="ts">
+/**
+ * 对话页（M9 调整 + 路由支持）
+ * - 支持 /chat/:sessionId（恢复指定会话）
+ * - 支持 ?q= query（从商品/订单跳转过来自动发问）
+ * - SSE meta 完整保存到 message（intent/entities/tool_result_preview）
+ * - 会话列表：左侧侧边栏
+ */
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import {
+  listConversations,
+  getMessages,
+  deleteConversation,
+  updateConversationTitle,
+  streamChat,
+ // SSE Resume：流式中断续传
+  resumeChat,
+  rateAnswer,
+} from '../api';
+import type { Conversation, Message, StreamEvent, ProductChoice } from '../types';
+import ConversationList from '../components/ConversationList.vue';
+import MessageList from '../components/MessageList.vue';
+import MessageInput from '../components/MessageInput.vue';
+
+const route = useRoute();
+const router = useRouter();
+
+const conversations = ref<Conversation[]>([]);
+const currentSessionId = ref<string | null>(null);
+const messages = ref<Message[]>([]);
+
+// ===== WP1 CSAT 会话满意度（供 kpi_service 聚合 csat/rating_coverage） =====
+const csatComment = ref('');
+const rated = ref(false);
+const canRate = computed(() => {
+  const last = messages.value[messages.value.length - 1];
+  return !streaming.value && messages.value.length > 0 && !!last && last.role === 'assistant';
+});
+// (2.3)：done 事件带回的 assistant 消息行 id——评价按"条"而非按"会话"。
+// 此前 message_id 恒 0，差评无法反查到具体回答（badcase 池的粒度债）
+const lastAssistantMessageId = ref<number | null>(null);
+
+async function submitRate(kind: 'up' | 'down'): Promise<void> {
+  if (!currentSessionId.value || rated.value) return;
+  try {
+    const resp = await rateAnswer(
+      currentSessionId.value, kind, csatComment.value.trim(),
+      lastAssistantMessageId.value ?? 0,
+    );
+    if (resp.ok) rated.value = true;
+  } catch (e) {
+    console.warn('CSAT 提交失败', e);
+  }
+}
+// 新一轮消息（追问/新会话）时重置评价状态
+watch(() => messages.value.length, () => {
+  rated.value = false;
+  csatComment.value = '';
+  lastAssistantMessageId.value = null;  // (2.3)：新轮次未拿到 done 前禁挂旧 id
+});
+
+const streaming = ref(false);
+const streamingText = ref('');
+const streamingMeta = ref<StreamEvent | null>(null);
+
+// 前端：状态机步骤指示器（decide → fetch_policy → synthesize → escalate）
+// UX：商品/订单咨询上下文（从商品页/订单页跳转携带，不自动发问）
+type ChatContext = { sku?: string; model?: string; name?: string; orderNo?: string };
+const pendingContext = ref<ChatContext>({});
+const contextBanner = computed(() => {
+  if (pendingContext.value.sku)
+    return { label: '商品', value: pendingContext.value.name || pendingContext.value.sku };
+  if (pendingContext.value.orderNo) return { label: '订单', value: pendingContext.value.orderNo };
+  return null;
+});
+function clearContext() {
+  pendingContext.value = {};
+  if (route.query.sku || route.query.model || route.query.name || route.query.order_no) {
+    router.replace({ query: {} });
+  }
+}
+
+// 换款候选：点选后写回上下文与 URL，下一轮请求自动切到新商品的切片
+const productChoices = ref<ProductChoice[]>([]);
+function chooseProduct(c: ProductChoice) {
+  productChoices.value = [];
+  pendingContext.value = { sku: c.sku, model: c.model, name: c.name };
+  router.replace({ query: { sku: c.sku, model: c.model, name: c.name } });
+}
+
+const FLOW_STEPS = [
+  { key: 'decide', label: '意图决策' },
+  { key: 'fetch_policy', label: '政策检索' },
+  { key: 'synthesize', label: '生成回复' },
+] as const;
+const flowStage = computed(() => (streamingMeta.value as any)?.flow_stage ?? null);
+const flowStepIdx = computed(() => {
+  if (!flowStage.value) return -1;
+  const i = FLOW_STEPS.findIndex(s => s.key === flowStage.value);
+  return i >= 0 ? i : (flowStage.value === 'escalate' ? FLOW_STEPS.length : -1);
+});
+
+// P0 前端：审批确认快捷按钮（检测最近 AI 消息的确认提示，替代手动打字）
+const showQuickConfirm = computed(() => {
+  const last = messages.value[messages.value.length - 1];
+  if (!last || last.role !== 'assistant') return false;
+  const c = String(last.content ?? '');
+  return c.includes('requires_user_input') || c.includes('回复「确认」') || c.includes('请用户回复「确认」');
+});
+async function quickConfirm() {
+  await sendMessage('确认');
+}
+
+const conversationsLoading = ref(false);
+const messagesLoading = ref(false);
+const error = ref('');
+
+// =============================================================
+// 会话列表
+// =============================================================
+async function loadConversations() {
+  conversationsLoading.value = true;
+  try {
+    const data = await listConversations();
+    conversations.value = data.conversations;
+  } catch (e) {
+    // 后台刷会话列表失败不应弹错（用户视角：SSE Resume 后短暂离线导致的
+    // "Failed to fetch" 不应该把"消息未送达"或全局 error banner 给用户看）。
+    // 静默吞掉，下次 done 后或下次 user 操作自然重试。
+    console.warn('loadConversations 失败（静默）:', e);
+  } finally {
+    conversationsLoading.value = false;
+  }
+}
+
+// =============================================================
+// 切换/恢复会话
+// =============================================================
+async function selectConversation(sessionId: string) {
+  if (streaming.value) return;
+  if (sessionId === currentSessionId.value) return;
+  await switchToSession(sessionId);
+}
+
+async function switchToSession(sessionId: string) {
+  currentSessionId.value = sessionId;
+  messages.value = [];
+  streamingText.value = '';
+  streamingMeta.value = null;
+  error.value = '';
+  await loadMessages();
+
+  // 同步路由（不带 ?q=）
+  router.replace({ name: 'chat-session', params: { sessionId } });
+}
+
+async function loadMessages(silent = false) {
+  if (!currentSessionId.value) return;
+  if (!silent) messagesLoading.value = true;
+  try {
+    const page = await getMessages(currentSessionId.value, undefined, 100);
+    const next = [...page.messages].reverse();
+    // 人工回复到达时轻提示（长度变化 = 有新消息）
+    const hasNew = next.length > messages.value.length;
+    messages.value = next;
+    if (silent && hasNew) {
+      // 新消息（人工直发）到达——滚动到底部由 MessageList 自身逻辑处理，
+      // 这里只做轻量刷新，不打断用户输入
+    }
+  } catch (e) {
+    if (!silent) error.value = e instanceof Error ? e.message : '加载消息失败';
+  } finally {
+    if (!silent) messagesLoading.value = false;
+  }
+}
+
+// 商城人工直发：买家端轮询（5s 静默刷新，人工回复落库后在此可见）
+let pollTimer: number | null = null;
+function startPolling() {
+  if (pollTimer !== null) return;
+  pollTimer = window.setInterval(() => {
+    if (streaming.value || messagesLoading.value || !currentSessionId.value) return;
+    void loadMessages(true);
+  }, 5000);
+}
+function stopPolling() {
+  if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+// =============================================================
+// 新会话
+// =============================================================
+function newChat() {
+  if (streaming.value) return;
+  currentSessionId.value = null;
+  messages.value = [];
+  streamingText.value = '';
+  streamingMeta.value = null;
+  error.value = '';
+  router.replace({ name: 'chat' });
+}
+
+// =============================================================
+// 删会话
+// =============================================================
+async function deleteConv(sessionId: string) {
+  if (streaming.value) return;
+  if (!confirm('删除这个会话？此操作不可恢复。')) return;
+  try {
+    await deleteConversation(sessionId);
+    if (currentSessionId.value === sessionId) {
+      newChat();
+    }
+    await loadConversations();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '删除失败';
+  }
+}
+
+// =============================================================
+// 清空全部会话
+// =============================================================
+async function clearAllConvs() {
+  if (streaming.value) return;
+  const targets = conversations.value;
+  if (!targets.length) return;
+  // 已在外层 confirm 二次确认（ConversationList onClearAll）
+  try {
+    // 并发删除（不阻塞 UI，后端软删除极快）
+    const currentSid = currentSessionId.value;
+    let currentDeleted = false;
+    await Promise.all(
+      targets.map(async (c) => {
+        try {
+          await deleteConversation(c.session_id);
+          if (c.session_id === currentSid) currentDeleted = true;
+        } catch (e) {
+          console.warn('删除失败', c.session_id, e);
+        }
+      }),
+    );
+    if (currentDeleted) newChat();
+    await loadConversations();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : '清空失败';
+  }
+}
+
+// =============================================================
+// 自动标题（首条 user 消息前 20 字符）
+// =============================================================
+const MAX_TITLE_LEN = 20;
+function buildAutoTitle(text: string): string {
+  // 去首尾空白 + 折叠中间空白
+  const cleaned = text.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return '新会话';
+  if (cleaned.length <= MAX_TITLE_LEN) return cleaned;
+  return `${cleaned.slice(0, MAX_TITLE_LEN)}…`;
+}
+
+async function setAutoTitle(sessionId: string, firstUserText: string) {
+  const title = buildAutoTitle(firstUserText);
+  try {
+    await updateConversationTitle(sessionId, title);
+  } catch (e) {
+    console.warn('设置自动标题失败', e);
+  }
+}
+
+// =============================================================
+ // 发送消息（SSE 流式 + M9.5 context 透传 + SSE Resume）
+// ctx: { sku?, orderNo? } —— 从 /shop/:sku 或订单卡片跳转过来时携带
+// =============================================================
+// SSE Resume 边界：
+//   - 自动 resume 最多 1 次（同 stream_id；后端限 2 次，留 1 次给手动重试）
+//   - 失败 fallback：仅显示"消息未送达"，不暴露 AI 痕迹
+const MAX_AUTO_RESUME = 1;
+const RESUME_ONLINE_TIMEOUT_MS = 5000;
+
+/**
+ * 等待浏览器恢复联网（最多 5s）。
+ * 防止 offline→catch→立即 resume→又撞 offline 的死循环。
+ * 用户视角：网络抖动的常见模式（数百 ms 断网）静默恢复；超过 5s 真的没网才放弃。
+ */
+function waitForOnline(maxMs: number = RESUME_ONLINE_TIMEOUT_MS): Promise<boolean> {
+  if (typeof navigator === 'undefined' || navigator.onLine) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(navigator.onLine), maxMs);
+    const handler = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    window.addEventListener('online', handler, { once: true });
+  });
+}
+
+async function sendMessage(text: string, ctx?: ChatContext) {
+  if (streaming.value) return;
+  if (!text.trim()) return;
+  // UX：未显式传 ctx 时自动附带咨询上下文（商品/订单页进入后，追问都带着上下文）
+  const effCtx = ctx ?? (Object.keys(pendingContext.value).length ? pendingContext.value : undefined);
+
+  error.value = '';
+
+  // 1) 乐观插入用户消息
+  const userMsg: Message = {
+    role: 'user',
+    content: text,
+    create_time: new Date().toISOString(),
+  };
+  messages.value = [...messages.value, userMsg];
+
+  // 2) 准备流式状态
+  streaming.value = true;
+  streamingText.value = '';
+  streamingMeta.value = null;
+  let fullAnswer = '';
+  let capturedMeta: StreamEvent | null = null;
+  // 新会话预生成 UUID：让后端复用作 session_id，
+  // 保证流中途断开时 resumeChat 能拿到 sid（不再受限于 done 事件）
+  // 兼容旧浏览器/headless 环境：crypto.randomUUID 在 Chrome 92+ 才稳定
+  const startSessionId =
+    currentSessionId.value ??
+    (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`).replace(
+      /-/g,
+      '',
+    );
+  const isFirstUserMessage = !currentSessionId.value; // 新会话才设标题
+
+ // SSE Resume：本回合 stream_id + 最后 seq（catch 时用于续传）
+  let streamId: string | undefined;
+  let lastEventId: number | undefined;
+
+  try {
+    // 3) 流式消费（带自动 resume：最多 MAX_AUTO_RESUME 次静默续传）
+    let resumeAttempt = 0;
+    while (true) {
+      let iter: AsyncGenerator<StreamEvent, void, void>;
+      if (resumeAttempt === 0) {
+        iter = streamChat(text, startSessionId, effCtx);
+      } else if (streamId && lastEventId !== undefined) {
+        // startSessionId 现在总是有效（新会话已预生成 UUID）
+        iter = resumeChat(
+          startSessionId,
+          streamId,
+          text,
+          lastEventId,
+          effCtx,
+        );
+      } else {
+        // 无法 resume（无 streamId）→ 抛出原始错误
+        throw new Error('网络异常');
+      }
+
+      try {
+        let streamEnded = false;
+        for await (const event of iter) {
+ // SSE Resume：捕获 event.id 给续传用
+          if (event.id !== undefined) lastEventId = event.id;
+
+          switch (event.type) {
+            case 'meta':
+              if (event.stream_id) streamId = event.stream_id;
+              capturedMeta = event;
+              streamingMeta.value = event;
+              break;
+            case 'token':
+              streamingText.value += event.text;
+              fullAnswer += event.text;
+              break;
+            case 'resume_prefix':
+ // SSE Resume：resume 端点一次性重发 prefix
+              // 前一次流已清空 streamingText → 用 prefix 重置
+              streamingText.value = event.prefix_text;
+              fullAnswer = event.prefix_text;
+              lastEventId = event.from_event_id;
+              break;
+            case 'product_choices':
+              productChoices.value = event.choices ?? [];
+              break;
+            case 'done':
+              currentSessionId.value = event.session_id;
+              // (2.3)：记录本条回答的消息 id（cache_hit/落库失败时无此字段→null）
+              lastAssistantMessageId.value = event.assistant_message_id ?? null;
+              {
+                const meta = capturedMeta && capturedMeta.type === 'meta' ? capturedMeta : null;
+                const assistantMsg: Message = {
+                  role: 'assistant',
+                  content: fullAnswer,
+                  intent: meta?.intent ?? null,
+                  entities: meta?.entities ?? null,
+                  tool_result_preview: meta?.tool_result_preview ?? null,
+                  card: meta?.card ?? null,
+                  // 转人工 payload（Agent 异常 / 用户要求转人工）
+                  handoff: meta?.handoff ?? null,
+                  contexts: meta?.contexts ?? null,
+                  scores: meta?.scores ?? null,
+                  create_time: new Date().toISOString(),
+                };
+                messages.value = [...messages.value, assistantMsg];
+              }
+              streamingText.value = '';
+              streamingMeta.value = null;
+              if (isFirstUserMessage && currentSessionId.value) {
+                await setAutoTitle(currentSessionId.value, text);
+              }
+              await loadConversations();
+              streamEnded = true;
+              break;
+            case 'error':
+              error.value = event.message || '生成失败';
+              streamingText.value = '';
+              streamingMeta.value = null;
+              streamEnded = true;
+              break;
+          }
+        }
+        // 正常结束（reader done）→ 跳出循环
+        return;
+      } catch (streamErr) {
+        // 流中断（reader 抛错 / 网络断开）
+        // 等网络恢复后再 resume（避免 offline → 立即 resume → 又撞 offline）
+        const backOnline = await waitForOnline();
+        if (
+          backOnline &&
+          resumeAttempt < MAX_AUTO_RESUME &&
+          streamId &&
+          lastEventId !== undefined
+        ) {
+          // 静默 resume：不显示任何提示，用户视角无感
+          resumeAttempt++;
+          continue;
+        }
+        // 超限或无法 resume / 仍未恢复 → 抛出给外层 catch
+        throw streamErr;
+      }
+    }
+  } catch (e) {
+    // 用户视角的"消息未送达"（不暴露 AI 痕迹 / 网络 / 流中断等技术细节）
+    error.value = '消息未送达，请重试';
+    streamingText.value = '';
+    streamingMeta.value = null;
+  } finally {
+    streaming.value = false;
+  }
+}
+
+// =============================================================
+// 路由参数处理
+// =============================================================
+onMounted(async () => {
+  startPolling();
+  await loadConversations();
+
+  // /chat/:sessionId → 恢复会话
+  const sid = route.params.sessionId as string | undefined;
+  if (sid) {
+    await switchToSession(sid);
+  }
+});
+
+onUnmounted(stopPolling);
+
+// 监听路由变化（用户手动改 URL）
+watch(
+  () => route.params.sessionId,
+  async (sid) => {
+    if (sid && sid !== currentSessionId.value) {
+      await switchToSession(sid as string);
+    } else if (!sid && currentSessionId.value) {
+      // 用户回到 /chat（无 sid） → 新会话
+      newChat();
+    }
+  },
+);
+
+// 监听 ?q= 自动发问（同时提取 ?sku= / ?order_no= context）
+// 关键：immediate: true —— 路由跳转时 ChatPage 是新挂载，初始 query 就该触发
+// 否则用户从商品详情跳过来时不会自动发问
+watch(
+  () => [route.query.q, route.query.sku, route.query.model, route.query.name, route.query.order_no],
+  async ([q, sku, model, name, orderNo]) => {
+    // UX：从商品/订单页跳转 = 用户想咨询这个品/单 → 只挂上下文，不自动发问；
+    // 显式 q（预填问题）仍保留自动发送（向后兼容）
+    const ctx: ChatContext = {};
+    if (typeof sku === 'string' && sku) ctx.sku = sku;
+    if (typeof model === 'string' && model) ctx.model = model;
+    if (typeof name === 'string' && name) ctx.name = name;
+    if (typeof orderNo === 'string' && orderNo) ctx.orderNo = orderNo;
+    pendingContext.value = ctx;
+
+    // 来源保留在 URL：刷新页面 / 新建会话仍能知道用户从哪个商品进来；
+    // 只清掉会自动触发发问的 q，避免刷新重复提问。
+    const keep: Record<string, string> = {};
+    if (ctx.sku) keep.sku = ctx.sku;
+    if (ctx.model) keep.model = ctx.model;
+    if (ctx.name) keep.name = ctx.name;
+    if (ctx.orderNo) keep.order_no = ctx.orderNo;
+
+    if (q && typeof q === 'string' && !streaming.value) {
+      await sendMessage(q, Object.keys(ctx).length ? ctx : undefined);
+      router.replace({ query: keep });
+    } else if (!q && Object.keys(keep).length) {
+      router.replace({ query: keep });
+    }
+  },
+  { immediate: true },
+);
+</script>
+
+<template>
+  <div class="chat-page">
+    <ConversationList
+      :conversations="conversations"
+      :current-session-id="currentSessionId"
+      :loading="conversationsLoading"
+      @select="selectConversation"
+      @refresh="loadConversations"
+      @new-chat="newChat"
+      @delete="deleteConv"
+      @clear-all="clearAllConvs"
+    />
+
+    <main class="chat-main">
+      <!-- LangGraph 状态机步骤指示器（流式时显示） -->
+      <div v-if="streaming && flowStepIdx >= 0" class="flow-steps">
+        <template v-for="(step, i) in FLOW_STEPS" :key="step.key">
+          <div class="flow-node" :class="{ active: i === flowStepIdx, done: i < flowStepIdx }">
+            <span class="flow-dot"></span>
+            <span class="flow-label">{{ step.label }}</span>
+          </div>
+          <div v-if="i < FLOW_STEPS.length - 1" class="flow-line" :class="{ done: i < flowStepIdx }"></div>
+        </template>
+      </div>
+
+      <!-- UX：商品/订单咨询上下文横幅（从商品页/订单页进入时显示） -->
+      <div v-if="contextBanner" class="ctx-banner">
+        <span class="ctx-label">正在咨询{{ contextBanner.label }}</span>
+        <span class="ctx-value">{{ contextBanner.value }}</span>
+        <button class="ctx-close" @click="clearContext" title="取消关联">×</button>
+      </div>
+
+      <!-- 换款候选：只来自真实在售商品，点一下即切换绑定 -->
+      <div v-if="productChoices.length" class="choice-panel">
+        <div class="choice-head">
+          <span>选择要咨询的商品</span>
+          <button class="choice-close" @click="productChoices = []" title="收起">×</button>
+        </div>
+        <div class="choice-grid">
+          <button
+            v-for="c in productChoices"
+            :key="c.model"
+            class="choice-card"
+            @click="chooseProduct(c)"
+          >
+            <img :src="c.cover" :alt="c.name" />
+            <span class="choice-cat">{{ c.category }}</span>
+            <span class="choice-name">{{ c.name }}</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- P0：审批确认快捷按钮（AI 请求确认时显示） -->
+      <div v-if="showQuickConfirm && !streaming" class="quick-confirm">
+        <span class="qc-hint">Agent 请求确认此操作</span>
+        <button class="qc-btn" @click="quickConfirm">✓ 确认执行</button>
+      </div>
+
+      <div v-if="messagesLoading" class="loading-tip">加载消息中…</div>
+
+      <div v-if="streaming" class="streaming-indicator">
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
+        <span class="label">正在生成…</span>
+      </div>
+
+      <MessageList
+        class="messages"
+        :messages="messages"
+        :streaming-text="streamingText"
+        :streaming="streaming"
+        :sources="[]"
+        :loading="messagesLoading"
+        :streaming-meta="streamingMeta"
+        @pick-suggestion="sendMessage"
+      />
+
+      <div v-if="error" class="error-banner">
+        {{ error }}
+        <button class="dismiss" @click="error = ''">×</button>
+      </div>
+
+      <!-- WP1 CSAT：AI 回答完成后的会话粒度满意度评价条 -->
+      <div v-if="canRate" class="csat-bar">
+        <span class="q">这次回答解决您的问题了吗？</span>
+        <button :disabled="rated" @click="submitRate('up')">👍 有用</button>
+        <button :disabled="rated" @click="submitRate('down')">👎 没用</button>
+        <input v-model="csatComment" maxlength="200" placeholder="可补一句哪里没解决好（选填）" :disabled="rated">
+        <span v-if="rated" class="done">已反馈，感谢 ✔</span>
+      </div>
+
+      <MessageInput :disabled="streaming" @send="sendMessage" />
+    </main>
+  </div>
+</template>
+
+<style scoped>
+.chat-page {
+  flex: 1;
+  display: flex;
+  height: 100%;
+  background: var(--gray-50);
+  overflow: hidden;
+}
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+.loading-tip {
+  padding: var(--sp-2) var(--sp-5);
+  text-align: center;
+  color: var(--gray-500);
+  font-size: var(--fs-sm);
+  background: var(--gray-100);
+  border-bottom: var(--border);
+  flex-shrink: 0;
+}
+.streaming-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-5);
+  background: var(--jd-red-light);
+  color: var(--jd-red);
+  font-size: var(--fs-sm);
+  border-top: 1px solid var(--jd-red);
+  flex-shrink: 0;
+}
+.streaming-indicator .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--jd-red);
+  border-radius: 50%;
+  animation: bounce 1.2s ease-in-out infinite;
+}
+.streaming-indicator .dot:nth-child(2) { animation-delay: 0.15s; }
+.streaming-indicator .dot:nth-child(3) { animation-delay: 0.3s; }
+.streaming-indicator .label {
+  margin-left: 6px;
+}
+@keyframes bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.error-banner {
+  padding: var(--sp-2) var(--sp-5);
+  background: var(--jd-red-light);
+  color: var(--jd-red-dark);
+  font-size: var(--fs-sm);
+  border-top: 1px solid var(--jd-red);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+.error-banner .dismiss {
+  background: none;
+  border: none;
+  color: var(--jd-red-dark);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 var(--sp-1);
+  line-height: 1;
+}
+
+/* WP1 CSAT 评价条 */
+.csat-bar { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; padding: 8px 10px; background: #f7f9fc; border: 1px solid #eef0f4; border-radius: 8px; font-size: 13px; flex-wrap: wrap; }
+.csat-bar .q { color: #556; }
+.csat-bar button { border: 1px solid #d9d9d9; background: #fff; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+.csat-bar button:disabled { opacity: .5; cursor: default; }
+.csat-bar input { flex: 1; min-width: 140px; border: 1px solid #e3e6ea; border-radius: 6px; padding: 3px 8px; }
+.csat-bar .done { color: #2e7d32; font-weight: 600; }
+</style>
+
+<style scoped>
+/* 状态机步骤指示器 */
+.flow-steps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 16px;
+  margin-bottom: 8px;
+  background: var(--gray-100);
+  border: 1px solid var(--glass-brd);
+  border-radius: var(--radius-base);
+}
+.flow-node { display: flex; align-items: center; gap: 6px; opacity: 0.45; transition: all .3s; }
+.flow-node.active { opacity: 1; }
+.flow-node.done { opacity: 0.85; }
+.flow-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--gray-400);
+}
+.flow-node.active .flow-dot {
+  background: var(--jd-red);
+  box-shadow: var(--accent-glow);
+  animation: flow-pulse 1.2s ease-in-out infinite;
+}
+.flow-node.done .flow-dot { background: var(--ok); }
+.flow-label { font-size: 13px; color: var(--gray-700); }
+.flow-node.active .flow-label { color: var(--gray-900); font-weight: 600; }
+.flow-line { width: 34px; height: 2px; background: var(--gray-400); }
+.flow-line.done { background: var(--jd-red); }
+@keyframes flow-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.35); }
+}
+
+/* P0：审批确认快捷卡片 */
+.quick-confirm {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; margin-bottom: 8px;
+  background: var(--jd-red-light);
+  border: 1px solid var(--glass-brd);
+  border-radius: var(--radius-base);
+}
+.qc-hint { font-size: 14px; color: var(--gray-700); }
+.qc-btn {
+  padding: 6px 18px;
+  background: var(--accent-gradient);
+  color: #fff; border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px; font-weight: 600;
+  box-shadow: var(--accent-glow);
+}
+.qc-btn:hover { filter: brightness(1.15); }
+</style>
+
+<style scoped>
+/* UX：咨询上下文横幅 */
+.ctx-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; margin-bottom: 8px;
+  background: var(--gray-100);
+  border: 1px solid var(--glass-brd);
+  border-radius: var(--radius-base);
+  font-size: 13px;
+}
+.ctx-label { color: var(--gray-500); }
+.ctx-value {
+  color: var(--gray-900); font-weight: 600;
+  padding: 2px 10px;
+  background: var(--jd-red-light);
+  border-radius: var(--radius-sm);
+}
+.ctx-close {
+  margin-left: auto;
+  background: none; border: none;
+  color: var(--gray-500); font-size: 16px;
+  cursor: pointer; padding: 0 4px;
+}
+.ctx-close:hover { color: var(--gray-900); }
+
+/* 换款候选卡片 */
+.choice-panel {
+  margin: 0 var(--sp-6) var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px solid var(--gray-300);
+}
+.choice-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 11px; letter-spacing: .14em; color: var(--gray-500);
+  margin-bottom: var(--sp-4);
+}
+.choice-close {
+  background: none; border: none; color: var(--gray-500);
+  font-size: 16px; cursor: pointer;
+}
+.choice-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-4); }
+.choice-card {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 0; background: transparent; border: 1px solid var(--gray-300);
+  text-align: left; overflow: hidden;
+}
+.choice-card:hover { border-color: var(--jd-red); }
+.choice-card img { width: 100%; aspect-ratio: 4 / 5; object-fit: cover; }
+.choice-cat {
+  font-size: 10px; letter-spacing: .14em; color: var(--jd-red);
+  padding: 0 var(--sp-2);
+}
+.choice-name {
+  font-size: 11px; line-height: 1.5; color: var(--gray-600);
+  padding: 0 var(--sp-2) var(--sp-2);
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+@media (max-width: 900px) {
+  .choice-grid { grid-template-columns: repeat(2, 1fr); }
+}
+</style>

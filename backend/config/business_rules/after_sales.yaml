@@ -1,0 +1,113 @@
+# 售后规则业务规则 — 场景组 A（spec §2.4）
+# 加载入口：app.services.config_loader.get_config_loader().load("after_sales")
+# 启动期一次加载；改完需重启服务（roadmap §3.5）
+# 售后规则（猫与小鼠 / 2026AW）。
+# 人读文本：suggested_text / evidence_required / additional_tips / 注释；
+# 枚举 key、condition 与数值阈值是工具入参与解析器契约，保持稳定。
+# ⚠️ 约束：condition 里的 "低于 50 元" / "高于 50 元" 被
+#   yaml_impl.get_refund_type_advice 以**子串匹配**解析（yaml_impl.py:169/183），
+#   改写表述时这两个 token 必须原样保留，否则阈值分支静默失效。
+# ⚠️ 单一真相源：3 个模块共享同一份 YAML
+#   - app/services/after_sales/yaml_impl.py（退款原因指导 / 运费险 / 仅退款vs退货退款）
+# 风格：所有 key 静态枚举，缺失时 yaml_impl 用 .get() 取默认值（不抛 KeyError），
+#       符合 spec §2.5 #8「缺字段返默认值」。
+
+# =============================================================
+# 退换原因模板（5 类 + other 兜底）
+# success_rate: 高 / 中 / 低 — 基于 reason_category 历史通过率
+# =============================================================
+REFUND_REASON_TEMPLATES:
+  quality:
+    suggested_text: "商品存在质量问题（具体：开线 / 破损 / 严重起球 / 明显色差），已附照片"
+    success_rate: "高"
+    evidence_required:
+      - "商品整体照片（含问题部位特写）"
+      - "吊牌照片（核对货号与成分）"
+      - "订单页截图（核对签收日期）"
+    additional_tips:
+      - "先对照洗护 FAQ 排除正常浮色、含羊毛面料轻微起球等非质量因素"
+      - "签收 15 天内质量问题由商家承担往返运费（2026.11 新政）"
+      - "不要使用'与描述不符'，直接写'质量问题'，走质量问题退换更快"
+  no_reason:
+    suggested_text: "不想要了（尺码不合适 / 风格不喜欢 / 已另购）"
+    success_rate: "中"
+    evidence_required: []
+    additional_tips:
+      - "7 天无理由退货需在签收后 7 天内申请"
+      - "吊牌完整未剪、未洗涤、未穿着、赠品一并退回才不影响二次销售"
+      - "已水洗或吊牌剪除不能走无理由，可在 15 天内按质量问题判定"
+      - "2026.11 起非质量问题退货运费由商家承担（赠运费险自动理赔）"
+  size:
+    suggested_text: "尺码选错（如 XL 偏大、腰围选小），需要换码"
+    success_rate: "中"
+    evidence_required:
+      - "尺码表截图（标注所选尺码）"
+      - "试穿照片或身高体重信息"
+    additional_tips:
+      - "上衣看胸围/衣长，裤装看腰围/臀围，毛衣注意平铺单面宽 ×2"
+      - "宽松版型按推荐表选码，喜修身可小一码；跨界时以体重维度优先"
+      - "发货前联系客服可直接改码（30 分钟内处理），已揽收需走换货流程"
+  not_as_described:
+    suggested_text: "与页面描述不符（面料成分 / 克重 / 颜色 / 版型）"
+    success_rate: "中"
+    evidence_required:
+      - "吊牌成分标签照片"
+      - "商品详情页参数截图"
+    additional_tips:
+      - "成分与克重以吊牌标注为准，页面标注错误属描述不符"
+      - "不同显示器轻微偏色不属色差；明显色差按质量问题处理"
+      - "平铺手工测量 1-3CM 误差属正常，不判定为规格不符"
+  late:
+    suggested_text: "发货 / 派送超时（承诺 48 小时，实际 X 天）"
+    success_rate: "低"
+    evidence_required:
+      - "订单页发货时效截图"
+      - "物流轨迹截图"
+    additional_tips:
+      - "先联系客服确认排期，现货超 48 小时未发货可申请补偿"
+      - "预售款以商品页标注为准（一般 7 天内发出），超 7 天可申请仅退款"
+  other:
+    suggested_text: "其他原因"
+    success_rate: "低"
+    evidence_required: []
+    additional_tips:
+      - "建议尽量选具体原因，成功率更高"
+
+# =============================================================
+# 退换货运费险规则
+# default_coverage: 默认最高赔付 25 元
+# high_value_threshold: 订单金额超过此值，按 high_value_coverage 赔付
+# eligible_statuses: 哪些退货阶段可触发理赔
+# estimated_payout_days: 预计到账天数
+# =============================================================
+SHIPPING_INSURANCE:
+  default_coverage: 25.0
+  high_value_threshold: 200.0
+  high_value_coverage: 50.0
+  eligible_statuses:
+    - "return_received"
+    - "refunded"
+  estimated_payout_days: 3
+
+# =============================================================
+# 仅退款 vs 退货退款推荐规则
+# 匹配优先级：先按 order_status + condition 精确匹配；否则返默认
+# 默认值：refund_only_scenarios 命中 → refund_only；
+#        return_and_refund_scenarios 命中 → return_and_refund；
+#        否则按 LOW_VALUE_THRESHOLD 决定
+# 服饰语境：成衣单价多数 ≥ 50 元 → 走"退货退款"；袜子/赠品等小件才走"仅退款"
+# =============================================================
+REFUND_TYPE_RULES:
+  low_value_threshold: 50.0   # 低于此值（配件/耗材）默认推荐仅退款
+  refund_only_scenarios:
+    - order_status: "shipped"
+      condition: "物流长时间不更新（大件卡在网点）"
+    - order_status: "delivered"
+      condition: "配件/耗材价值低于 50 元（整机走退货退款）"
+    - any_status: true
+      condition: "商家责任（发错型号/漏发配件）"
+  return_and_refund_scenarios:
+    - order_status: "delivered"
+      condition: "整机价值高于 50 元 + 不想要/规格选错"
+    - order_status: "delivered"
+      condition: "质量问题（需上门检测或返厂）"

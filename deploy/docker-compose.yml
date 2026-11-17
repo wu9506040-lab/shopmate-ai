@@ -1,0 +1,415 @@
+# =============================================================
+# 智能客服 Agent 系统 - Docker Compose（精简基础设施版）
+# 服务: api / frontend / milvus / redis / mysql
+# =============================================================
+
+# 所有 build 镜像走国内 registry-mirrors（在 ~/.docker/daemon.json 已配）
+services:
+  # ---------------------------------------------------------
+  # FastAPI 后端 - RAG + Agent 核心
+  # ---------------------------------------------------------
+  api:
+    build:
+      # 治本（2026-07-19）：build context 改为项目根，让 Dockerfile 能 COPY scripts/
+      # （原 context=../backend 无法引用项目根的 scripts/ 目录）
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: customer-service-api:dev
+    container_name: customer-service-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Qwen (DashScope) LLM 配置
+      QWEN_API_KEY: ${QWEN_API_KEY}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL}
+      QWEN_MODEL: ${QWEN_MODEL}
+      # 双意图补答灰度开关（coordinator 次专家补答）
+      ENABLE_DUAL_INTENT_DISPATCH: ${ENABLE_DUAL_INTENT_DISPATCH:-false}
+      # embedding 独立凭证（空 = 回落 QWEN_API_KEY/DASHSCOPE_BASE_URL）
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      # 数据库
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}?charset=utf8mb4
+      # 缓存
+      REDIS_URL: redis://redis:6379/0
+      # 向量库
+      VECTOR_COLLECTION: knowledge_base
+      MILVUS_URI: http://customer-service-milvus:19530
+      # 文件上传/日志
+      UPLOAD_DIR: /app/uploads
+      LOG_DIR: /app/logs
+      # 应用
+      APP_ENV: ${APP_ENV:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # LangGraph 开关（控制 synthesizer._handle_refund 走 V2 还是 V3）
+      USE_LANGGRAPH_REFUND: ${USE_LANGGRAPH_REFUND:-false}
+      # 退款流程 Resolver 自动解析（0/1/N 决策，取代"请提供订单号"）
+      ENABLE_ORDER_RESOLVER: ${ENABLE_ORDER_RESOLVER:-false}
+      # BusinessFlow 抽象 - RefundFlow 包装 V3 + flow_stage meta 推送
+      ENABLE_BUSINESS_FLOW: ${ENABLE_BUSINESS_FLOW:-false}
+      # 转人工兜底 - RefundFlow/handle_refund_v3 双异常 fallback
+      ENABLE_ESCALATION_HANDOFF: ${ENABLE_ESCALATION_HANDOFF:-false}
+      # C2 Agent FC 灰度开关（2026-07-16 C4 验证开启；false 走 V1.2 fallback）
+      ENABLE_AGENT_FC: ${ENABLE_AGENT_FC:-false}
+      MAX_AGENT_TURNS: ${MAX_AGENT_TURNS:-5}
+      # 补漏：这两个开关此前只在代码默认值，不在 compose 注入清单，
+      # 改行为要靠重新 build 镜像——部署层漂移源头之一
+      SSE_CARD_V2: ${SSE_CARD_V2:-true}
+      ENABLE_CONTEXT_STORE: ${ENABLE_CONTEXT_STORE:-false}
+      # JWT 鉴权（2026-06-28 轮换，不依赖 config.py 默认占位符）
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
+      # 闲鱼 MCP 渠道接入（2026-10-14）
+      # 容器内 ~/.goofish-cli/cookies.json 需通过 volumes 挂载；
+      # 启用前先在本机 goofish auth login 导出 cookie，再复制到容器
+      ENABLE_XIANYU_TOOLS: ${ENABLE_XIANYU_TOOLS:-false}
+      # ---- Feature Flag 注入补全（2026-10-30 · 审计报告 1.7/1.8）----
+      # 此前 5 个开关只存在于 config.py 默认值，compose 未注入 →
+      # 改行为必须重建镜像（部署层漂移）。现全部注入，改 .env 即可生效。
+      ENABLE_MULTI_QUERY: ${ENABLE_MULTI_QUERY:-false}
+      ENABLE_PROMPT_VERSIONING: ${ENABLE_PROMPT_VERSIONING:-false}
+      ENABLE_DEMO_LOGIN: ${ENABLE_DEMO_LOGIN:-true}
+      ENABLE_USER_PROFILE: ${ENABLE_USER_PROFILE:-false}
+      ENABLE_USER_CONTEXT_PRELOAD: ${ENABLE_USER_CONTEXT_PRELOAD:-false}
+    volumes:
+      - uploads_data:/app/uploads
+      - logs_data:/app/logs
+      # 治本（2026-07-19）：KB 文档随容器重建（volume mount），避免 ECS 容器销毁后 Milvus KB 丢失
+      - ./../docs/ecommerce_kb:/app/docs/ecommerce_kb:ro
+      # 开发体验：源码 bind mount（dev only；prod 应 baked-in）
+      - ./../backend/app:/app/app:ro
+      # 管理台「账号管理」要写 channel_accounts.json / credentials / cookies，
+      # 因此 API 侧必须可写；daemon 侧保持 :ro（只消费，不写配置）。
+      - ./../backend/config:/app/config:rw
+      - ./../backend/logs:/app/logs
+      - ./../backend/tests:/app/tests:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # 延长启动期（2026-07-19 M3）：给 entrypoint.sh KB 检测 + 可选 ingest 留 60s
+      start_period: 60s
+
+  # ---------------------------------------------------------
+  # Java 中台（P5：三部分架构 — 前端 | Java 中台 | Python AI）
+  # 平台业务：鉴权/会话消息真源/SSE 网关；AI 推理在 Python 服务
+  # 宿主 8081（8080 常被本机其它服务占用）
+  # ---------------------------------------------------------
+  java-api:
+    build:
+      context: ../java-platform
+      dockerfile: Dockerfile
+    image: customer-service-java:dev
+    container_name: customer-service-java
+    restart: unless-stopped
+    ports:
+      - "${JAVA_API_PORT:-8081}:8080"
+    environment:
+      # 数据库（容器内 service name；Java 平台层是 MySQL 的唯一写入者）
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: ${MYSQL_DATABASE}
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      # JWT：与 Python 共用同一密钥 — 跨语言 token 互认的前提
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-24}
+      # Python AI 服务地址（SSE 网关透传目标）
+      AI_BASE_URL: http://customer-service-api:8000
+      # 时区
+      TZ: Asia/Shanghai
+    depends_on:
+      mysql:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # ---------------------------------------------------------
+  # 前端 - Vue3 构建产物 + nginx 反代
+  # 镜像源：registry.cn-hangzhou.aliyuncs.com/library/nginx（国内加速）
+  # Vue3 构建：本地 npm run build → frontend/dist/，mount 到 nginx html
+  # ---------------------------------------------------------
+  frontend:
+    image: nginx:alpine
+    container_name: customer-service-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    volumes:
+      # Vue3 构建产物（dist/ 由本地 npm run build 生成）
+      - ../frontend/dist:/usr/share/nginx/html:ro
+      # nginx 配置（覆盖默认）
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    networks:
+      - frontend
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------
+  # Milvus 向量库（standalone 单容器 embedded etcd）
+  # ---------------------------------------------------------
+  # ---------------------------------------------------------
+  # Milvus 向量库（standalone）
+  # ---------------------------------------------------------
+  milvus:
+    image: milvusdb/milvus:v2.4.17  # 本地已拉取（embed etcd 模式需挂载 embedEtcd.yaml）
+    container_name: customer-service-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local
+    volumes:
+      - milvus_data:/var/lib/milvus
+      - ./milvus/embedEtcd.yaml:/milvus/configs/embedEtcd.yaml:ro
+      - ./milvus/user.yaml:/milvus/configs/user.yaml:ro
+    ports:
+      - "19530:19530"   # gRPC（pymilvus）
+      - "9091:9091"     # metrics/healthz
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  # ---------------------------------------------------------
+  # Redis 缓存
+  # ---------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: customer-service-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    command: redis-server --appendonly yes --maxmemory 100mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------
+  # MySQL 8 - 结构化数据
+  # ---------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: customer-service-mysql
+    restart: unless-stopped
+    ports:
+      # 宿主 3307 -> 容器 3306（避开本机已装的 MySQL 占用 3306）
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --default-time-zone=+08:00
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+# ---------------------------------------------------------
+  # 闲鱼自动化 daemon（常驻容器）
+  # - 失败自动重启（restart: unless-stopped）：死循环 / OOM / exit code != 0 都拉起
+  # - bind mount host logs/ → 容器 /app/logs（运维侧查日志）
+  # - 命名卷 cookies_data → 容器 ~/.goofish-cli，cookies.json 跨重启持久化
+  # - 容器内 DATABASE_URL 用 service name `mysql`（不是 127.0.0.1:3307）
+  # - depends_on api（health）确保 /api/chat 可用再启 daemon
+  # ---------------------------------------------------------
+  xianyu-daemon:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.daemon
+    image: customer-service-xianyu-daemon:dev
+    container_name: customer-service-xianyu-daemon
+    restart: unless-stopped
+    environment:
+      # LLM
+      QWEN_API_KEY: ${QWEN_API_KEY}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL}
+      QWEN_MODEL: ${QWEN_MODEL}
+      # 数据库（容器内 service name）
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE}?charset=utf8mb4
+      # 缓存（容器内 service name）
+      REDIS_URL: redis://redis:6379/0
+      # 向量库
+      VECTOR_COLLECTION: knowledge_base
+      MILVUS_URI: http://customer-service-milvus:19530
+      # Daemon 调 /api/chat（容器内用 service name 而非 localhost）
+      XIANYU_CHAT_API_URL: http://customer-service-api:8000/api/chat
+      # 闲鱼 MCP
+      ENABLE_XIANYU_TOOLS: ${ENABLE_XIANYU_TOOLS:-true}
+      # 应用
+      APP_ENV: ${APP_ENV:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # 鉴权
+      JWT_SECRET: ${JWT_SECRET}
+      # 延迟参数（默认值；可被镜像内 .env.* 覆盖）
+      XIANYU_DEBOUNCE_WINDOW: ${XIANYU_DEBOUNCE_WINDOW:-8}
+      XIANYU_FIRST_MIN_DELAY: ${XIANYU_FIRST_MIN_DELAY:-0}
+      XIANYU_FIRST_MAX_DELAY: ${XIANYU_FIRST_MAX_DELAY:-3}
+      # 时区
+      TZ: Asia/Shanghai
+    volumes:
+      # P1: 宿主机 cookie.txt 挂到容器 — 容灾 backup / 手动导入用
+      # （运行时由 goofish CLI 用 ~/.goofish-cli/cookies.json）
+      - ./../cookie.txt:/app/cookie.txt:ro
+      # 持久化 cookies.json（命名卷跨重启保留）
+      - cookies_data:/root/.goofish-cli
+      # 宿主机 logs 目录（host 看日志无需 docker cp；biz 日志走文件不走 stdout）
+      - ./../logs:/app/logs
+      # 镜像内代码/配置位于 /app/backend/{app,config}（脚本按 /app/backend 推算
+      # sys.path 与 ACCOUNTS_FILE）；旧配置挂到 /app/app、/app/config 是无效挂载，
+      # daemon 一直读构建时 COPY 的旧注册表，改 accounts.json 不生效。
+      - ./../backend/app:/app/backend/app:ro
+      - ./../backend/config:/app/backend/config:ro
+      # 同一份宿主配置再挂到 /app/config：API 容器写 Cookie 用这个路径，
+      # daemon 通过它读取凭据文件（两个容器路径一致）
+      - ./../backend/config:/app/config:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+    networks:
+      - backend
+    # 不限内存（让 LLM 生成等长任务能跑完；OOM 由 daemon process 自我退出触发重启）
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+# =============================================================
+# Volumes - bind mount 到 E 盘，避免占 C 盘
+# =============================================================
+volumes:
+  milvus_data:
+  milvus_etcd_data:
+  milvus_minio_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT}/milvus_minio
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT}/redis
+  mysql_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT}/mysql
+  uploads_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT}/uploads
+  logs_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_ROOT}/logs
+  # P1: 闲鱼 daemon cookies 持久化（bind 容器内 /root/.goofish-cli）
+  # 因为 Windows HOME 路径不稳定，用命名卷更可控；首次需手动注入 cookies
+  cookies_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${USERPROFILE}/.goofish-cli
+
+# =============================================================
+# Networks - 前端/后端网络隔离
+# - frontend: 浏览器/外部访问层
+# - backend: 服务间通信层
+# =============================================================
+networks:
+  frontend:
+    driver: bridge
+    name: customer-service-frontend
+  backend:
+    driver: bridge
+    name: customer-service-backend

@@ -1,0 +1,265 @@
+"""
+: chat.prompt_assembler 纯函数单元测试
+
+覆盖 chat/prompt_assembler.py 的 7 个纯字符串处理函数：
+- _build_chat_prompt  - 7 段优先级拼接（context > tool > policy > product > history > 问题）
+- _format_tool_result - order_query / refund_query 的 [订单]/[退款] 标签格式化
+- _format_policy_docs - policy 加 [1][2]... 编号
+- _format_history      - 历史消息 user/assistant 拼接
+- _extract_order_no_from_history - 从历史提取最近 ORD... 订单号（M9.5+ / M13 修）
+
+设计原则：
+- 纯函数测试，无 I/O / 无 DB / 无 LLM 依赖 → pytest 直接跑
+- 与 test_source_attribution.py 不重复（那个测端到端 LLM 调用后的产物；这个测单一函数输出）
+- 与 test_prompt_loader.py 解耦（那个测 YAML 加载；这个测加载后的字符串处理）
+
+依据：docs/decisions/2026-07-12-sprint-3-synthesizer-split.md §6 + §10
+"""
+import os
+import sys
+
+# 让模块能找到 app 包（与项目其他测试一致）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+# =============================================================
+# _build_chat_prompt：7 段优先级硬约束
+# =============================================================
+
+def test_build_chat_prompt_no_blocks_falls_back_to_empty():
+    """所有段都为空 → 保留「无可用资料」兜底段 + 仍拼问题"""
+    from app.services.chat.prompt_assembler import _build_chat_prompt
+
+    out = _build_chat_prompt(
+        intent="policy_query",
+        tool_block="",
+        policy_block="",
+        product_block="",
+        history_block="",
+        query="运费多少",
+    )
+    assert "无可用资料" in out, f"空 blocks 应有兜底段: {out}"
+    assert "问题：运费多少" in out
+    # 顺序：兜底段在「问题」之前
+    assert out.index("无可用资料") < out.index("问题：")
+
+
+def test_build_chat_prompt_context_block_takes_priority():
+    """context_block 已从 user 段迁到 system 段（_build_system_content）。
+    仍保持"最高优先级"语义——拼到 SYSTEM_PROMPT_BASE 之后，并以
+    【结构化事实-渠道上下文（最高优先级）】标签显形。"""
+    from app.services.chat.stream_dispatcher import _build_system_content
+
+    out = _build_system_content("【当前订单】ORD001 已发货")
+    # 1. context_block 真进了 system message
+    assert "【当前订单】ORD001 已发货" in out
+    # 2. 显形标签存在
+    assert "【结构化事实-渠道上下文（最高优先级）】" in out
+    # 3. 标签在 ctx 内容之前（最高优先级前置声明）
+    tag_idx = out.index("【结构化事实-渠道上下文（最高优先级）】")
+    ctx_idx = out.index("ORD001 已发货")
+    assert tag_idx < ctx_idx, f"【结构化事实】标签应在 ctx 内容之前；actual out={out!r}"
+
+
+def test_build_chat_prompt_full_priority_ordering():
+    """双层优先级：
+    - system 层：context_block → SYSTEM_PROMPT_BASE（最高优先级）
+    - user 层（_build_chat_prompt）：secondary > tool > policy > product > history > 问题"""
+    from app.services.chat.prompt_assembler import _build_chat_prompt
+    from app.services.chat.stream_dispatcher import _build_system_content
+
+    # user 层：5 段顺序（V16.3.4 不再含 ctx——ctx 已迁 system）
+    user_out = _build_chat_prompt(
+        intent="refund_query",
+        tool_block="TOOL",
+        policy_block="POLICY",
+        product_block="PRODUCT",
+        history_block="HISTORY",
+        query="Q",
+        context_block="CTX",
+    )
+    user_indices = [
+        user_out.index("TOOL"),
+        user_out.index("POLICY"),
+        user_out.index("PRODUCT"),
+        user_out.index("HISTORY"),
+        user_out.index("问题：Q"),
+    ]
+    assert user_indices == sorted(user_indices), \
+        f"user 段 5 段顺序乱了：{user_indices}\n{user_out!r}"
+    # ctx 不在 user 段（V16.3.4 关键变更）
+    assert "CTX" not in user_out, "V16.3.4 后 ctx 不应再出现在 user 段"
+    # system 层：ctx 进入了 system message 头部
+    sys_out = _build_system_content("CTX")
+    assert "CTX" in sys_out
+    assert "【结构化事实-渠道上下文（最高优先级）】" in sys_out
+
+
+def test_build_chat_prompt_sections_separated_by_blank_lines():
+    """段落之间用 \\n\\n 分隔，便于 LLM 区分"""
+    from app.services.chat.prompt_assembler import _build_chat_prompt
+
+    out = _build_chat_prompt(
+        intent="policy_query",
+        tool_block="T",
+        policy_block="P",
+        product_block="",
+        history_block="",
+        query="Q",
+    )
+    # 至少有 2 个空行（tool 段、policy 段、问题段共 3 段 → 2 个间隔）
+    assert "\n\n" in out
+
+
+# =============================================================
+# _format_policy_docs：政策加 [1][2]... 编号
+# =============================================================
+
+def test_format_policy_docs_empty_returns_empty_string():
+    """空列表 → 空字符串（不输出「无相关政策」之类兜底，由 _build_chat_prompt 决定）"""
+    from app.services.chat.prompt_assembler import _format_policy_docs
+    assert _format_policy_docs([]) == ""
+    assert _format_policy_docs(None) == ""
+
+
+def test_format_policy_docs_truncates_long_text():
+    """> 500 字符的文本截断 + 加 ... 后缀"""
+    from app.services.chat.prompt_assembler import _format_policy_docs
+
+    # POLICY_CTX_CHAR_LIMIT 现在是 1000，测试文本必须超过它才会走截断分支
+    long_text = "X" * 1500
+    out = _format_policy_docs([{"text": long_text}])
+    assert "[1]" in out
+    assert "..." in out
+    assert len(out) < len(long_text) + 50  # 留 buffer 给 [1] / 换行
+
+
+# =============================================================
+# _format_history：复用 pipeline 的 user/assistant 拼接
+# =============================================================
+
+def test_format_history_skips_empty_content():
+    """空 content 的消息跳过（防止空行污染 prompt）"""
+    from app.services.chat.prompt_assembler import _format_history
+
+    history = [
+        {"role": "user", "content": "  "},  # 仅空白 → 视为空
+        {"role": "user", "content": "真问题"},
+        {"role": "assistant", "content": ""},
+        {"role": "assistant", "content": "回答"},
+    ]
+    out = _format_history(history)
+    assert "真问题" in out
+    assert "回答" in out
+    # 应只有 2 行（user/assistant 各 1），没有空行
+    assert out.count("用户：") == 1
+    assert out.count("助手：") == 1
+
+
+def test_format_history_unknown_role_skipped():
+    """非 user/assistant 角色（如 system / tool）不输出"""
+    from app.services.chat.prompt_assembler import _format_history
+
+    history = [
+        {"role": "system", "content": "系统提示"},  # 跳过
+        {"role": "tool", "content": "工具输出"},     # 跳过
+        {"role": "user", "content": "ok"},
+    ]
+    out = _format_history(history)
+    assert "系统提示" not in out
+    assert "工具输出" not in out
+    assert "ok" in out
+
+
+# =============================================================
+# _extract_order_no_from_history：M9.5+ 兜底提取订单号
+# =============================================================
+
+def test_extract_order_no_from_history_returns_latest():
+    """多轮对话中提取最近一个 ORDER 号（反向遍历）"""
+    from app.services.chat.prompt_assembler import _extract_order_no_from_history
+
+    history = [
+        {"role": "user", "content": "ORD20260101001 物流"},
+        {"role": "assistant", "content": "已发货"},
+        {"role": "user", "content": "那能退吗 ORD20260202002"},  # 最新提到
+    ]
+    assert _extract_order_no_from_history(history) == "ORD20260202002"
+
+
+def test_extract_order_no_from_history_supports_letter_suffix():
+    """修复：订单号 ORD+8 位日期 + 3-6 位字母数字混合（含字母后缀如 899EBA）"""
+    from app.services.chat.prompt_assembler import _extract_order_no_from_history
+
+    history = [
+        {"role": "user", "content": "ORD20260704899EBA 啥情况"},  # 含字母后缀
+    ]
+    assert _extract_order_no_from_history(history) == "ORD20260704899EBA"
+
+
+def test_extract_order_no_from_history_returns_none_when_absent():
+    """无 ORDER 串 → None（让上游走「请提供订单号」分支）"""
+    from app.services.chat.prompt_assembler import _extract_order_no_from_history
+
+    assert _extract_order_no_from_history(None) is None
+    assert _extract_order_no_from_history([]) is None
+    assert _extract_order_no_from_history([{"role": "user", "content": "今天天气如何"}]) is None
+
+
+if __name__ == "__main__":
+    import pytest
+    pytest.main([__file__, "-v"])
+
+
+# =============================================================
+# _format_policy_docs 总预算（2026-11-17）
+# 单条 1000 只管"每条多长"，管不住"给几条"：top_k=5 就是 5000 字符
+# =============================================================
+
+def test_format_policy_docs_total_budget_caps_doc_count():
+    """5 条各 1000 字 → 总预算 3500 内放不下 5 条，必须停并声明少给了几条。"""
+    from app.services.chat import prompt_assembler
+
+    docs = [{"text": f"{i}" + "X" * 999} for i in range(1, 6)]
+    out = prompt_assembler._format_policy_docs(docs)
+
+    body = out.split("（另有")[0]
+    assert len(body) <= prompt_assembler._rag_total_chars() + 20
+    assert "条资料因篇幅限制未展示" in out
+    assert "[5]" not in out            # 最后一条被省略
+
+
+def test_format_policy_docs_small_docs_untouched():
+    """小资料不该被总预算改变任何字节（向后兼容老行为）。"""
+    from app.services.chat import prompt_assembler
+
+    docs = [{"text": "七天无理由退货"}, {"text": "运费险最高赔 12 元"}]
+    out = prompt_assembler._format_policy_docs(docs)
+
+    assert out == "[1] 七天无理由退货\n[2] 运费险最高赔 12 元"
+    assert "未展示" not in out
+
+
+def test_format_policy_docs_keeps_first_even_with_tiny_budget(monkeypatch):
+    """预算被配到极小也要给第一条——返回空资料等于把 RAG 变成裸答。"""
+    from app.services.chat import prompt_assembler
+
+    monkeypatch.setattr(prompt_assembler, "_rag_total_chars", lambda: 120)
+    out = prompt_assembler._format_policy_docs([{"text": "A" * 900}, {"text": "B" * 900}])
+
+    assert out.startswith("[1] ")
+    assert "[2]" not in out
+    assert "另有 1 条资料" in out
+
+
+def test_format_policy_docs_skips_empty_text_entries():
+    """空 text 的条目跳过；编号仍按原始排名（引用要对得上检索名次）。"""
+    from app.services.chat import prompt_assembler
+
+    out = prompt_assembler._format_policy_docs(
+        [{"text": "有内容"}, {"text": "   "}, {"text": "也有内容"}]
+    )
+
+    assert "[1] 有内容" in out
+    assert "[3] 也有内容" in out      # 空缺的 [2] 不重新编号
+    assert "未展示" not in out

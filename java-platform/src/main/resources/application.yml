@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: cs-platform
+  datasource:
+    # P1 阶段连本机 docker 映射的 MySQL（3307→3306），与 Python 共用同一套表
+    # 注意 characterEncoding 必须是 Java 字符集名 UTF-8：
+    # 写 utf8mb4（MySQL 侧名字）驱动会抛 Unsupported character encoding
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3307}/${DB_NAME:customer_service}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8
+    username: ${DB_USER:cs_user}
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 5000
+
+platform:
+  jwt:
+    # 与 Python 侧共用同一 JWT_SECRET（跨语言 token 互认的核心前提）
+    # 不设默认值：缺失即启动失败（fail-fast，与 Python config 校验哲学一致）
+    secret: ${JWT_SECRET:}
+    expire-hours: ${JWT_EXPIRE_HOURS:24}
+    cookie-name: cs_token
+  ai:
+    # Python AI 服务地址（P2 SSE 网关透传目标）
+    base-url: ${AI_BASE_URL:http://localhost:8000}
+    chat-path: /api/chat
+    gateway:
+      # SSE 透传超时（与 nginx /api/chat 专线 300s 对齐）
+      timeout-ms: 300000
+      # 上游连接超时
+      connect-timeout-ms: 5000
+
+logging:
+  level:
+    com.zhixuan.platform: INFO
