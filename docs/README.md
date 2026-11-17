@@ -7,7 +7,7 @@
 | 路径 | 内容 |
 |---|---|
 | `docs/fashion_kb/` | 客服知识库：尺码指南（2026AW 现行版 + 2025 旧版）、退换货政策（2026.11 新政 + 2026.06 旧版）、发货物流、双 11 活动与已过期 618、面料洗护 FAQ、订单修改规则、商品参数总表 |
-| `data/evalsets/evalset_v3_fashion.json` | 32 条黄金评测集（检索 / 版本时效 / 商品参数 / Agent 工具 / 稳定性 / 安全） |
+| `data/evalsets/evalset_v3_fashion.json` | 68 条黄金评测集（检索 35 / 版本时效 7 / 边界·安全·权限 21 / Agent·稳定性 5） |
 | `scripts/` | 知识库灌库、评测、重放、商品数据 seed、mock LLM、端到端测试 |
 | `backend/` | FastAPI 服务（意图路由 / RAG / Agent / SSE / 管理台 API） |
 | `java-platform/` | Java 中台（鉴权 / 会话 / SSE 网关 / 数据看板） |

@@ -5,7 +5,7 @@
 > 不是自动回复脚本，是覆盖 **多渠道接入 → AI 应答 → 人机协同 → 知识运营** 全链路的客服系统。
 >
 > 当前演示场景：**服饰电商（猫与小鼠 2026AW，9 款在售 / 57 个尺码 SKU）**，主场景为淘宝/抖音店铺客服；知识库 `docs/fashion_kb/`、
-> 评测集 `data/evalsets/evalset_v3_fashion.json`（66 条七维评测，含边界/安全/权限 34 条）。本地直跑见 `backend/run_local.sh`、
+> 评测集 `data/evalsets/evalset_v3_fashion.json`（68 条七维评测，含边界/安全/权限/时效 33 条）。本地直跑见 `backend/run_local.sh`、
 > `java-platform/run_local.sh`，中间件走 Docker 容器映射端口。
 
 [![CI](https://github.com/wu9506040-lab/shopmate-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/wu9506040-lab/shopmate-ai/actions/workflows/ci.yml)
@@ -107,7 +107,7 @@ sequenceDiagram
     S->>B: 打字模拟 + 分段发送
 ```
 
-详细分层说明见 [docs/project_overview.md](docs/project_overview.md)。
+文档总览与目录结构见 [docs/README.md](docs/README.md)，服务分层说明见下文「架构」章节。
 
 ---
 
@@ -283,10 +283,10 @@ python scripts/watchdog_xianyu_daemon.py &
 
 | 指标 | 数值 |
 |------|------|
-| 测试 | 1,225 passed / 0 failed（pytest 实测口径，2026-10-24） |
-| 评测 | 四层：330 题召回 + 60 题话术 + 20 组多轮 + 20 组跨会话记忆（评测集均已入库）；服饰域七维 66 题（含边界/安全/权限 34 条） |
+| 测试 | 1,726 passed / 19 skipped / 0 failed（覆盖率 68%，ruff 全绿；2026-11-17 实测） |
+| 评测 | 四层：330 题召回 + 60 题话术 + 20 组多轮 + 20 组跨会话记忆（评测集均已入库）；服饰域七维 68 题（含边界/安全/权限/时效 33 条） |
 | Function Call 工具 | 19 个（含虚拟商品自动发货） |
-| Git 提交 | 340+（活跃开发中） |
+| 代码规模 | 约 10.3 万行 / 528 个源文件（Python 8.7 万 · Vue 0.9 万 · TS+Java 0.6 万） |
 | 端到端延迟 | 54s → 8-15s（分阶段优化，全程日志拆解） |
 
 ---
