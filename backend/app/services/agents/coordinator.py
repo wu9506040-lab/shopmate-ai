@@ -85,18 +85,15 @@ def chain_with_secondary(
             continue
 
         # 订单/退款类次意图先过改判尺：意图分类常把物流/政策问句
-        # 顺带判出 order_query/refund_query（「能指定顺丰吗」→ product+order）。
-        # 用户没提自己的订单（无个人锚点），派 OrderAgent 只会解析出
-        # 0 单话术拼在主答案后面，纯噪音。同把尺子已在 orchestrator
-        # 改判主意图时用过，这里对次意图保持同一口径。
+        # 顺带判出 order_query/refund_query（「能指定顺丰吗」「有我的码吗」
+        # 的「码」歧义）。次专家没有主回答兜底，0 单话术一出口就是纯噪音——
+        # 漏补答用户还能追问，噪音话术直接污染主答案，所以这里的尺子
+        # 比主意图改判更宽：只要 query 没有指向"我自己那一单"的锚点，
+        # 就不派单/退款专家（主意图改判仍用 should_reroute_to_policy 保守尺）。
         if secondary_intent in ("order_query", "refund_query"):
-            from app.services.chat.order_scope import should_reroute_to_policy
-            from app.services.chat.orchestrator import _has_locked_order
+            from app.services.chat.order_scope import has_personal_reference
 
-            if should_reroute_to_policy(
-                ctx.query, secondary_intent,
-                has_locked_order=_has_locked_order(ctx.session_id, ctx.user_id),
-            ):
+            if not has_personal_reference(ctx.query):
                 logger.info(
                     f"[dual-dispatch] 跳过次意图 {secondary_intent}："
                     f"无个人锚点，属政策/物流问句 query={ctx.query[:40]!r}",
@@ -119,7 +116,16 @@ def chain_with_secondary(
 
         sec_ctx = AgentContext(
             query=ctx.query, user_id=ctx.user_id,
-            intent_result={"primary": secondary_intent, "intents": [{"intent": secondary_intent}]},
+            # entities 必须带上：专家链路（refund_handler / refund_flow /
+            # orchestrator order 分支）都用 intent_result["entities"] 硬下标，
+            # 缺这个键会让次专家 dispatch 抛 KeyError——实测表现为
+            # 「次意图补充失败（忽略）: 'entities'」，meta 发了、答案全丢，
+            # 双专家补答从未真正工作过。
+            intent_result={
+                "primary": secondary_intent,
+                "intents": [{"intent": secondary_intent}],
+                "entities": (ctx.intent_result or {}).get("entities") or {},
+            },
             session_id=ctx.session_id, order_no=ctx.order_no, sku=ctx.sku,
             context_block=ctx.context_block, history=ctx.history,
             channel=ctx.channel, buyer_unb=ctx.buyer_unb,
