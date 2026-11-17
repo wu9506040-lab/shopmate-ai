@@ -9,7 +9,7 @@
  * - 转人工原因随工单落库：中文标签 + 触发依据 + 用户原话，显著展示
  * - 建单规则：用户明确要人工 / AI 异常 / 业务规则（含发货后改址），按优先级分级
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import {
   closeHandoffTicket,
   getHandoffTicket,
@@ -103,6 +103,27 @@ function close(): void {
 function priorityClass(p?: string | null): string {
   return p === 'P0' ? 'pri pri-p0' : p === 'P1' ? 'pri pri-p1' : 'pri';
 }
+
+/**
+ * 用户原话：会话里用户消息的最后 3 条。
+ * 坐席第一眼要看到「买家到底说了什么」，而不是只看分类标签——
+ * 曾有工单因为 AI 回复里出现「质量问题」四个字被误判成 P0，界面上却看不到用户原话，无从判断真假。
+ */
+const userQuotes = computed<{ id: number; content: string; create_time?: string | null }[]>(() => {
+  const msgs = current.value?.messages || [];
+  return msgs.filter((m) => m.role === 'user').slice(-3);
+});
+
+/** 触发词是否真的出现在用户说的话里；不在 → 大概率是 AI 回复内容误触发，界面需显式告警 */
+const kwMismatch = computed<boolean>(() => {
+  const kw = current.value?.matched_keyword;
+  if (!kw) return false;
+  const userText = (current.value?.messages || [])
+    .filter((m) => m.role === 'user')
+    .map((m) => m.content)
+    .join('\n');
+  return !userText.includes(kw);
+});
 function statusClass(s?: string): string {
   return `st st-${s || 'pending'}`;
 }
@@ -177,6 +198,24 @@ onBeforeUnmount(() => {
             <span>工单号：<b>{{ current.ticket_no }}</b></span>
             <span>创建：{{ timeText(current.create_time) }}</span>
           </div>
+        </div>
+
+        <!-- 用户原话：先看买家说了什么，再判断这个工单该不该存在 -->
+        <div class="quotes">
+          <div class="quotes-head">
+            <span class="quotes-kicker">用户原话</span>
+            <span class="hint">买家最后 {{ userQuotes.length }} 句</span>
+            <span v-if="kwMismatch" class="warn">
+              ⚠ 触发依据「{{ current.matched_keyword }}」未出现在用户消息中，疑似由 AI 回复内容误触发
+            </span>
+          </div>
+          <ul v-if="userQuotes.length" class="quote-list">
+            <li v-for="q in userQuotes" :key="q.id">
+              <time>{{ timeText(q.create_time) }}</time>
+              <span>{{ q.content }}</span>
+            </li>
+          </ul>
+          <p v-else class="empty">该工单未关联到用户消息，无法核对诉求原文</p>
         </div>
 
         <div class="d-head">
@@ -290,6 +329,22 @@ onBeforeUnmount(() => {
 .reason-detail { font-size: 12px; color: #5b4636; line-height: 1.65; margin: 7px 0; }
 .reason-meta { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11px; color: #8a6a4a; }
 .reason-meta b { color: #5b4636; }
+
+/* 用户原话：与橙色「为什么转人工」区分开，蓝色系表示"原始证据" */
+.quotes {
+  background: #f7f9fc; border: 1px solid #e2e8f2; border-left: 3px solid #2563eb;
+  border-radius: 8px; padding: 10px 14px;
+}
+.quotes-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.quotes-kicker { font-size: 10px; font-weight: 700; color: #1e40af; letter-spacing: 1px; }
+.quotes-head .warn {
+  font-size: 11px; color: #92400e; background: #fef3c7;
+  border: 1px solid #fcd34d; border-radius: 5px; padding: 2px 7px;
+}
+.quote-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.quote-list li { display: flex; gap: 9px; font-size: 13px; color: #1b2536; line-height: 1.6; }
+.quote-list time { flex: none; font-size: 11px; color: #8593a6; padding-top: 3px; }
+.quote-list li span { font-weight: 500; }
 
 .d-head { display: flex; align-items: center; gap: 10px; font-size: 13px; color: #223047; }
 .hint { font-size: 11px; color: #7b8a9e; line-height: 1.6; }
