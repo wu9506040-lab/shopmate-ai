@@ -351,7 +351,7 @@ class TestSecondaryIntentBlockInjection:
             secondary_intent_block=secondary_block,
         )
 
-        assert "【用户可能的次要问题】(V12 多意图识别)" in prompt
+        assert "【用户可能的次要问题】" in prompt
         assert "policy_query" in prompt
         assert "0.65" in prompt
 

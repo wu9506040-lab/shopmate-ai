@@ -30,7 +30,8 @@ def test_system_prompt_has_anti_hallucination_constraints():
         "[商品]",          # 商品标签
         "[知识库]",        # 知识库标签
         "我不知道",         # 无资料兜底
-        "200 字以内",      # 长度限制
+        "字以内",          # 长度限制（当前生效版 v4 是 150 字；不锁死具体数字，
+                           # 否则每次调阈值都要改测试，而约束本身并没变）
     ]
     for kw in required:
         assert kw in SYSTEM_PROMPT_BASE, f"SYSTEM_PROMPT_BASE 缺少硬约束: {kw!r}"
@@ -108,7 +109,7 @@ def test_handle_product_empty_uses_safe_fallback():
         pt_mock.get_by_sku.return_value = None
         pt_mock.search_by_keyword.return_value = []
         pt_mock_stream.search_by_keyword.return_value = []
-        ps_mock.search_policy.return_value = []
+        ps_mock.search_with_retry.return_value = []
 
         from app.services.chat.orchestrator import Synthesizer
         events = list(Synthesizer._handle_product(
@@ -122,9 +123,11 @@ def test_handle_product_empty_uses_safe_fallback():
     # meta + token (兜底) + done
     event_types = [e[0] for e in events]
     assert "meta" in event_types and "token" in event_types and "done" in event_types
-    # 兜底文本中要提"暂无"/"无资料" + 不含具体规格
+    # 兜底文本要明确告知"没拿到资料" + 不含具体规格
+    # 2026-11：话术改成"资料我这边一时没调到…"（更主动引导报款号），
+    # 语义约束没变——测试锁的是"说清没资料"，不是逐字文案
     tokens = "".join([d for t, d in events if t == "token"])
-    assert "暂无" in tokens or "无" in tokens, f"兜底文本不明确: {tokens}"
+    assert any(k in tokens for k in ("暂无", "没调到", "无资料")), f"兜底文本不明确: {tokens}"
     assert "骁龙" not in tokens and "mAh" not in tokens, f"兜底文本不应含具体规格: {tokens}"
     print(f"PASS: 商品+KB 双空 → 兜底文本（不调 LLM，无具体规格）")
 
@@ -152,7 +155,7 @@ def test_handle_product_with_real_data_uses_tagged_prompt():
         pt_mock.get_by_sku.return_value = fake_product
         pt_mock.search_by_keyword.return_value = [fake_product]
         pt_mock_stream.search_by_keyword.return_value = [fake_product]
-        ps_mock.search_policy.return_value = []
+        ps_mock.search_with_retry.return_value = []
         provider_mock.return_value.stream_chat.side_effect = mock_qwen
 
         from app.services.chat.orchestrator import Synthesizer
@@ -230,7 +233,7 @@ def test_handle_policy_prompt_has_numbered_refs():
 
     with patch("app.services.chat.orchestrator.PolicyService") as ps_mock, \
          patch("app.services.chat.stream_dispatcher.get_llm_provider") as provider_mock:
-        ps_mock.search_policy.return_value = [
+        ps_mock.search_with_retry.return_value = [
             {"text": "7天无理由退货政策", "source": "policy_return", "score": 0.92},
             {"text": "运费险说明", "source": "policy_shipping", "score": 0.85},
         ]

@@ -208,10 +208,11 @@ class TestHandleProductFallbackUsesLLMWhenContextBlockPresent:
         with patch.object(_orch, "ProductTool") as MockPT, \
              patch.object(_orch, "PolicyService") as MockPS, \
              patch.object(_orch.stream_dispatcher, "stream_llm", side_effect=fake_stream_llm), \
-             patch.object(_orch.stream_dispatcher, "stream_simple", side_effect=fake_stream_simple):
+             patch.object(_orch.stream_dispatcher, "stream_simple", side_effect=fake_stream_simple), \
+             patch.object(_orch.stream_dispatcher, "search_by_keyword_window", return_value=[]):
             MockPT.get_by_sku.return_value = None
             MockPT.search_by_keyword.return_value = []
-            MockPS.search_policy.return_value = []
+            MockPS.search_with_retry.return_value = []
             MockPS.search_multi_policy.return_value = []
 
             intent = {

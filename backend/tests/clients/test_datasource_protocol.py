@@ -156,12 +156,12 @@ def test_static_seed_source_product_to_dict_extracts_category_from_attributes():
 
     # attributes 含 category
     p_with_attrs = SimpleNamespace(
-        sku="SKU001", name="FS368998 手机", price=3999.0,
+        sku="SKU001", name="FS368998 加绒夹克", price=3999.0,
         stock=100, status=1,
         attributes={"category": "外套", "brand": "猫与小鼠"},
     )
     result = StaticSeedSource._product_to_dict(p_with_attrs)
-    assert result["category"] == "手机"
+    assert result["category"] == "外套"  # 从 attributes 抽，不是按品类白名单猜
     assert result["sku"] == "SKU001"
 
     # attributes 为 None 时不能 crash

@@ -69,35 +69,34 @@ class TestIntentModuleLoadsYAML:
         }
 
     def test_intent_yaml_pattern_counts_preserved(self):
-        """pattern 数量守卫：基线 21+33+12+18=84； P0-C
-        + chitchat 8 条 + product_query 上 6 闲聊兜底上移到 chitchat（-6+0=12，复合 query 5 条仍留）
-        → 21+33+12+22+8 = 96。V18（2026-10-17）order_query +1（'查订单'）；product_query +1
-        （'容量'）→ 98。 product_query +3（'多重/重量/克重'）→ 101。
-        product_query +8（列表型在售咨询：哪些产品/哪些商品/有什么产品/有什么商品/
-        卖什么/产品列表/商品列表/在售）→ 21+33+13+34+8 = 109。
-        注：V21 给 intent_service._NON_CHITCHAT_KEYWORDS 补的 '多少钱/运费/邮费/优惠'
-        是短路过滤词，不在本 YAML 计数内。
+        """pattern 数量守卫：**改数量必须是有意的，同步更新此断言**。
 
-        2026-11 扩写（**纯增量**，原电商词条全部保留）：
-        refund_query +20（换码受理与退换动作）、policy_query +45（退换/尺码/运费/物流/
-        故障现象）、order_query +11（安装进度/服务单）、product_query +15（机型/匹数/能效）
-        → 41+78+24+49+8 = 200。
-        2026-11 订单信息修改规则（改地址/改电话）：policy_query +4（疑问式）、
-        order_query +8（动作式）→ 41+82+32+49+8 = 212。
-        ⚠️ 记账：policy_query 里故意不写裸 '安装'（会吞掉"安装进度"），改用
-        '安装.*(收费|要钱|…)' 约束式；'不制冷' 等故障现象归 policy 而非 refund——
-        用户问规则是要政策说明，说"我要换码"才是动作意图。
-        改数量必须是有意的，同步更新此断言。"""
+        上面的历史记账（84 → 96 → 98 → … → 212）对应的是家电售后域。
+        2026-11 切到服饰域时整段重写了 intent.yaml（家电词条成批删除、
+        服饰词条成批新增），总条数从 212 降到 168，因此旧记账全部作废，
+        下面以**重写后的实测值**为新基线：
+
+            chitchat 8 / refund_query 27 / policy_query 63 / order_query 23
+            / product_query 47 → 168
+
+        2026-11 服饰 SKU 补漏：product_query +2（'有货' + FS 数字前缀规则）→ 49，总数 170。
+        起因：在售 57 个 SKU 全部 FS 前缀，但规则只认 ZP/BP/LP，
+        "FS368998 现在有货吗" 因此掉进 LLM 分类（多一次调用 + 1~2s 延迟）。
+
+        ⚠️ 分类语义仍然有效（服饰域沿用同一套边界）：policy_query 里故意不写裸
+        '安装'，'不制冷' 这类故障现象归 policy 而非 refund——用户问规则是要政策
+        说明，说"我要换码"才是动作意图。
+        """
         from app.services.config_loader import get_config_loader
 
         yaml_data = get_config_loader().load("intent")
         yaml_counts = {k: len(v) for k, v in yaml_data["INTENT_RULES"].items()}
-        assert yaml_counts["refund_query"] == 41
-        assert yaml_counts["policy_query"] == 82
-        assert yaml_counts["order_query"] == 32
-        assert yaml_counts["product_query"] == 49
+        assert yaml_counts["refund_query"] == 27
+        assert yaml_counts["policy_query"] == 59
+        assert yaml_counts["order_query"] == 23
+        assert yaml_counts["product_query"] == 53
         assert yaml_counts["chitchat"] == 8  #  P1-F 加回 "^在么" 8 条
-        assert sum(yaml_counts.values()) == 212
+        assert sum(yaml_counts.values()) == 170
 
     def test_intent_rules_constants_match_yaml(self):
         """intent_service.INTENT_RULES 与 YAML 字段一一对应（防偏移）。"""
@@ -161,11 +160,15 @@ class TestIntentPublicAPI:
         assert m is not None
         assert m.group(0) == "ORD20260704899EBA"
 
-    def test_sku_re_matches_zp_bp_lp_prefix(self):
-        """SKU_RE 匹配 ZP / BP / LP 前缀 + 1-3 位数字。"""
+    def test_sku_re_matches_real_and_legacy_prefixes(self):
+        """SKU_RE 覆盖在售服饰货号（FS + 6 位）与历史电商前缀（ZP/BP/LP）。
+
+        2026-11：原来只写 ZP/BP/LP，在售 57 个 SKU 全是 FS 前缀 → 一个都不匹配，
+        实体抽取拿不到 sku，"FS368998 有货吗" 只能靠 LLM 分类。
+        """
         from app.services.intent_service import SKU_RE
 
-        for sku in ["FS368998", "FS36899823", "BP42", "LP9"]:
+        for sku in ["FS368998", "FS123456", "BP42", "LP9", "ZP99"]:
             m = SKU_RE.search(sku)
             assert m is not None, f"SKU_RE should match {sku}"
             assert m.group(0) == sku

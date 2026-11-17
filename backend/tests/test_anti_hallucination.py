@@ -38,7 +38,7 @@ def test_product_not_found_no_llm():
         pt_mock.search_by_keyword.return_value = []
         pt_mock_stream.search_by_keyword.return_value = []
         # KB 全空
-        ps_mock.search_policy.return_value = []
+        ps_mock.search_with_retry.return_value = []
 
         from app.services.chat.orchestrator import Synthesizer
         events, llm_called = _drain(Synthesizer._handle_product(
@@ -53,10 +53,10 @@ def test_product_not_found_no_llm():
     assert "token" in event_types, "应有 token 事件"
     assert "done" in event_types, "应有 done 事件"
 
-    # 兜底文本应明确说"未找到"
+    # 兜底文本应明确说"没拿到资料"（话术演进后不再逐字含"未找到"）
     tokens = [d for t, d in events if t == "token"]
     full_text = "".join(tokens)
-    assert "未找到" in full_text or "暂无" in full_text, \
+    assert any(k in full_text for k in ("未找到", "暂无", "没调到")), \
         f"兜底文本应明确告知无资料, 实际: {full_text}"
 
     # meta 中 products_found=0 + kb_hits=0
@@ -79,7 +79,7 @@ def test_product_not_found_but_kb_hit_goes_llm():
         pt_mock.search_by_keyword.return_value = []
         pt_mock_stream.search_by_keyword.return_value = []
         # KB 命中 1 条
-        ps_mock.search_policy.return_value = [
+        ps_mock.search_with_retry.return_value = [
             {"text": "HKZ26946 是测试商品，续航 10 小时。", "source": "products.json", "score": 0.85}
         ]
         provider_mock.return_value.stream_chat.return_value = iter(fake_llm_chunks)
@@ -115,7 +115,7 @@ def test_product_found_normal():
         pt_mock.get_by_sku.return_value = fake_product
         pt_mock.search_by_keyword.return_value = [fake_product]
         pt_mock_stream.search_by_keyword.return_value = [fake_product]
-        ps_mock.search_policy.return_value = []
+        ps_mock.search_with_retry.return_value = []
         provider_mock.return_value.stream_chat.return_value = iter(fake_llm_chunks)
 
         from app.services.chat.orchestrator import Synthesizer

@@ -37,8 +37,13 @@ class FakeVector:
     def upsert(self, collection_name: str, points: List, **kwargs) -> Dict[str, Any]:
         ids: List[str] = []
         for p in points:
-            self.points[str(p.id)] = dict(p.payload or {})
-            ids.append(str(p.id))
+            # Milvus 迁移后写入点是 dict；旧代码用 PointStruct 对象，两种都兼容
+            if isinstance(p, dict):
+                pid, payload = p.get("id"), p.get("payload")
+            else:
+                pid, payload = p.id, p.payload
+            self.points[str(pid)] = dict(payload or {})
+            ids.append(str(pid))
         self.upsert_calls.append(ids)
         return {"status": "completed", "count": len(ids)}
 

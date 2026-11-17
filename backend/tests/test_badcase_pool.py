@@ -301,6 +301,10 @@ class TestMergeScriptHelpers:
         path = (os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)))) + os.sep + "scripts" + os.sep +
             "merge_badcase_to_eval.py")
+        if not os.path.exists(path):
+            # 合并脚本已从仓库移除（badcase → 评测集改为人工/CLI 流程）。
+            # 保留用例而不删：脚本若恢复，这层回归自动生效。
+            pytest.skip("scripts/merge_badcase_to_eval.py 不在仓库中")
         spec = importlib.util.spec_from_file_location("merge_bce", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

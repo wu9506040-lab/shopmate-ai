@@ -58,7 +58,7 @@ def test_different_source_same_text_different_id():
     text = "7 天无理由退货"
 
     id_s1 = compute_chunk_id("policy_return.json", text)
-    id_s2 = compute_chunk_id("policy_return.json", text)
+    id_s2 = compute_chunk_id("policy_refund.json", text)  # 不同 source 才谈得上"不串 ID"
 
     assert id_s1 != id_s2
 
@@ -115,10 +115,14 @@ def test_ingest_text_uses_compute_chunk_id():
     expected_id = compute_chunk_id("test_src", "a" * 500, position=0)
     captured_ids = []
 
+    def _point_id(p):
+        # upsert 的点在 Milvus 迁移后是 dict；旧版本是 PointStruct 对象，两种都认
+        return str(p.get("id") if isinstance(p, dict) else p.id)
+
     class FakeVector:
         def upsert(self, collection_name, points, **kwargs):
             for p in points:
-                captured_ids.append(str(p.id))
+                captured_ids.append(_point_id(p))
             return {"status": "completed", "count": len(points)}
 
     provider = MagicMock()
@@ -126,7 +130,7 @@ def test_ingest_text_uses_compute_chunk_id():
 
     with patch.object(ingest, "get_embedding_provider", return_value=provider), \
          patch.object(ingest, "ensure_collection", return_value=True), \
-         patch.object(ingest, "upsert_points", side_effect=lambda points, **kw: (captured_ids.extend(str(p.id) for p in points), len(points))[1]), \
+         patch.object(ingest, "upsert_points", side_effect=lambda points, **kw: (captured_ids.extend(_point_id(p) for p in points), len(points))[1]), \
          patch.object(ingest, "upsert_knowledge_meta", return_value=MagicMock(id=1)):
         ingest.ingest_text("a" * 600, source="test_src")  # 600 字符 → 切 2 片
 

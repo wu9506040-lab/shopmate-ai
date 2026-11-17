@@ -16,6 +16,7 @@ pytest conftest — 全局共享 fixture (SOP-V1 §2.2 数据可信验证规范�
 """
 import os
 import sys as _sys
+from pathlib import Path as _Path
 
 # =============================================================
 # Windows 环境块 32KB 修复（session 级 autouse）
@@ -41,9 +42,33 @@ def _clean_oversized_env_vars():
 os.environ.setdefault(
     "JWT_SECRET", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
 )  # 32 字符，绕过 settings 启动校验
+def _default_database_url() -> str:
+    """默认连接串：本机优先用 backend/.env 的真实值，CI 用 services 映射的 127.0.0.1。
+
+    原先写死 `@mysql:3306`（compose 服务名）——那个名字只在 compose 网络内可解析，
+    本地直跑和 GitHub Actions runner 都是 getaddrinfo failed，于是所有真库集成
+    测试（价目、policy 归属校验、chunk 幂等…）只能靠 shell 里显式 export
+    DATABASE_URL 才跑得起来，等于默认状态下测不到。
+    """
+    env_file = _Path(__file__).resolve().parents[1] / ".env"
+    try:
+        for raw in env_file.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("DATABASE_URL="):
+                value = line.split("=", 1)[1].strip().strip('"').strip("'")
+                if value:
+                    return value
+    except OSError:
+        pass
+    # CI（GitHub Actions services 端口映射到 runner 本机）
+    return (
+        "mysql+pymysql://placeholder:pwd@127.0.0.1:3306/customer_service?charset=utf8mb4"
+    )
+
+
 os.environ.setdefault(
-    "DATABASE_URL", "mysql+pymysql://placeholder:pwd@mysql:3306/customer_service?charset=utf8mb4"
-)  # 占位值；真 DB 测试用 sqlite_url 覆盖
+    "DATABASE_URL", _default_database_url()
+)  # 真 DB 测试直连；纯单测用 db_session fixture 的 sqlite 覆盖
 os.environ.setdefault("APP_ENV", "test")
 
 

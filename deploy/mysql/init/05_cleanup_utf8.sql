@@ -1,7 +1,13 @@
--- 清空被双重编码的数据（utf8mb4 重灌）
+-- =============================================================
+-- 已停用（2026-11）
+--
+-- 本脚本原本用于"清空被双重编码的数据后重灌"，直接 DELETE 三张业务表。
+-- 但它在 init 顺序里排在 04_products_seed.sql 之后执行，会把刚 seed 好的
+-- 57 个 SKU 全部删掉 —— 干净库（CI / 首次部署）因此 products 永远是 0 行，
+-- 连带 08 生成的价目为空、商品检索与价目集成测试全红。
+--
+-- 现在 04 自带 SET NAMES utf8mb4 + DELETE + INSERT，重灌需求已自足，
+-- 这里改成空操作。需要全量重灌时请执行 04_products_seed.sql。
+-- =============================================================
 SET NAMES utf8mb4;
-DELETE FROM order_items;
-DELETE FROM orders;
-DELETE FROM products;
-DELETE FROM users WHERE username NOT IN ('admin', 'demotest');
-SELECT 'CLEAN_OK' AS status;
+SELECT 'CLEANUP_DISABLED' AS status;

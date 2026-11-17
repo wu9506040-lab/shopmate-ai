@@ -86,7 +86,7 @@ def test_single_query_short_circuits():
         result = PolicyService.search_multi_policy(["only one"], top_k=3)
 
     assert len(result) == 3
-    mock_sp.assert_called_once_with("only one", top_k=3)
+    mock_sp.assert_called_once_with("only one", top_k=3, threshold_relax=0.0)
     # schema 校验
     assert result[0]["text"] == "single doc 0"
     assert result[0]["source"] == "src_single_0"
@@ -105,7 +105,7 @@ def test_multi_query_runs_rag_per_query_and_fuses():
     ]
     call_count = [0]
 
-    def fake_search(query, top_k=3):
+    def fake_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax 等新增参数
         idx = call_count[0]
         call_count[0] += 1
         return hits_per_query[idx]
@@ -129,7 +129,7 @@ def test_single_query_exception_continues_others():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = False
     call_count = [0]
 
-    def side_effect(query, top_k=3):
+    def side_effect(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax
         call_count[0] += 1
         if call_count[0] == 2:  # 第 2 路失败
             raise RuntimeError("Vector timeout")
@@ -156,7 +156,7 @@ def test_rff_fuse_failure_falls_back_to_first():
     fake_hits_q1 = _make_fake_hits("q1", 5)
     fake_hits_q2 = _make_fake_hits("q2", 5)
 
-    def fake_search(query, top_k=3):
+    def fake_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax 等新增参数
         return fake_hits_q1 if "q1" in query else fake_hits_q2
 
     try:
@@ -202,7 +202,7 @@ def test_parallel_uses_thread_pool_when_enabled():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = False  # 强制 A5 per-query rerank 路径
     thread_names = []
 
-    def fake_search(query, top_k=3):
+    def fake_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax 等新增参数
         thread_names.append(threading.current_thread().name)
         return _make_fake_hits(query, 2)
 
@@ -230,7 +230,7 @@ def test_parallel_disabled_falls_back_to_serial():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = False  # 强制 A5 路径
     thread_names = []
 
-    def fake_search(query, top_k=3):
+    def fake_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax 等新增参数
         thread_names.append(threading.current_thread().name)
         return _make_fake_hits(query, 2)
 
@@ -259,7 +259,7 @@ def test_parallel_workers_respects_config():
     active_workers = set()
     active_lock = threading.Lock()
 
-    def fake_search(query, top_k=3):
+    def fake_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax 等新增参数
         with active_lock:
             active_workers.add(threading.current_thread().name)
         import time
@@ -288,7 +288,7 @@ def test_parallel_single_query_no_pool():
     settings.MULTI_QUERY_PARALLEL = True
     thread_names = []
 
-    def fake_search(query, top_k=3):
+    def fake_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax 等新增参数
         thread_names.append(threading.current_thread().name)
         return _make_fake_hits(query, 2)
 
@@ -313,7 +313,7 @@ def test_parallel_exception_isolation_unchanged():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = False  # 强制 A5 路径
     call_count = [0]
 
-    def side_effect(query, top_k=3):
+    def side_effect(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax
         call_count[0] += 1
         # 第 2 路失败（多线程下不一定严格是 2，但失败一定会出现一次）
         if call_count[0] == 2:
@@ -352,7 +352,7 @@ def test_fuse_first_rerank_called_once():
     # mock search_policy_coarse：3 路各返 3 条不重叠候选
     coarse_calls = [0]
 
-    def fake_coarse(query, top_k=15):
+    def fake_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax 等新增参数
         coarse_calls[0] += 1
         return _make_fake_hits(f"q{coarse_calls[0]}", 3)
 
@@ -387,7 +387,7 @@ def test_fuse_first_uses_queries_0():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = True
     settings.MULTI_QUERY_PARALLEL = False  # 串行便于观察调用顺序
 
-    def fake_coarse(query, top_k=15):
+    def fake_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax 等新增参数
         return _make_fake_hits(query, 2)  # 用 query 当 prefix 便于区分
 
     rerank_mock = MagicMock(return_value=_make_fake_hits("reranked", 3))
@@ -422,7 +422,7 @@ def test_fuse_first_truncates_to_15():
     settings.RERANK_CANDIDATE_TOP_K = 15
 
     # 3 路各返 10 条不重叠 → RRF 融合后 = 30 条
-    def fake_coarse(query, top_k=15):
+    def fake_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax 等新增参数
         prefix = query.split("-")[-1]
         return _make_fake_hits(f"{prefix}", 10)
 
@@ -455,7 +455,7 @@ def test_fuse_first_fallback_on_rerank_failure():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = True
     settings.MULTI_QUERY_PARALLEL = False
 
-    def fake_coarse(query, top_k=15):
+    def fake_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax 等新增参数
         return _make_fake_hits(f"q{query[-1]}", 5)
 
     rerank_mock = MagicMock(side_effect=RuntimeError("LLM rerank 超时"))
@@ -488,7 +488,7 @@ def test_fuse_first_disabled_falls_back_to_a5():
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = False  # 关闭 A8
     settings.MULTI_QUERY_PARALLEL = False  # 串行便于计数
 
-    def fake_coarse(query, top_k=15):
+    def fake_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax 等新增参数
         return _make_fake_hits(query, 2)
 
     # 模拟 A5 路径：search_policy 内部可能调 rerank
@@ -527,7 +527,7 @@ def test_a8_emits_metrics_log_with_mode_and_rerank_count(caplog):
     settings.MULTI_QUERY_FUSE_FIRST_RERANK = True
     settings.MULTI_QUERY_PARALLEL = False  # 串行便于确定 rerank_calls
 
-    def fake_coarse(query, top_k=15):
+    def fake_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax 等新增参数
         return _make_fake_hits(f"q{query[-1]}", 3)
 
     rerank_mock = MagicMock(return_value=_make_fake_hits("reranked", 3))

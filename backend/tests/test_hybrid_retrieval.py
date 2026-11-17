@@ -39,8 +39,10 @@ def test_tokenize_english_words():
     """场景 2：英文/数字按单词切"""
     from app.services.bm25_index import _tokenize
 
-    tokens = _tokenize("HKZ26946 Pro Max 续航")
-    assert "zp2" in tokens
+    # 原来断言 'zp2' in tokens，但样本是 HKZ26946 —— 旧货号残留的笔误，
+    # 分词器从来没产出过 'zp2'。用当前在售货号 FS368998 做样本。
+    tokens = _tokenize("FS368998 Pro Max 续航")
+    assert "fs368998" in tokens
     assert "pro" in tokens
     assert "max" in tokens
     # 中文字符也应被切

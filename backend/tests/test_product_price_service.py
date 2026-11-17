@@ -44,7 +44,9 @@ def test_no_period_returns_none_for_unknown_sku():
 
 
 def test_batch_query_does_not_drop_skus():
-    skus = ["FS368998-M", "HKZ26946-M", "MY154-M"]
+    # 用当前在售的真实 SKU：HKZ/MY 前缀的货没上架（products 表 0 行），
+    # 拿它们断言"不丢 SKU"等于测一个不存在的商品，永远红
+    skus = ["FS368998-M", "FS368998-L", "FS368998-XL"]
     prices = get_current_prices(skus, today="2026-11-14")
     assert all(s in prices for s in skus)
     assert all(p.version == "2026-11" for p in prices.values())

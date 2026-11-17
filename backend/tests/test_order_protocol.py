@@ -58,11 +58,11 @@ def seeded_session():
     products = [
         ProductORM(id=1, sku="SKU1", name="FS368998 加绒夹克", price=3999, stock=10,
                    status=1, description="旗舰", attributes={"color": "黑"}),
-        ProductORM(id=2, sku="SKU2", name="HKZ26946 千元手机", price=1999, stock=5,
+        ProductORM(id=2, sku="SKU2", name="HKZ26946 加绒马甲", price=1999, stock=5,
                    status=1, description="性价比", attributes={"color": "白"}),
-        ProductORM(id=3, sku="SKU3", name="加绒夹克", price=699, stock=0,
+        ProductORM(id=3, sku="SKU3", name="针织开衫", price=699, stock=0,
                    status=1, description="针织衫", attributes=None),
-        ProductORM(id=4, sku="SKU4", name="下架手机", price=1, stock=0,
+        ProductORM(id=4, sku="SKU4", name="下架马甲", price=1, stock=0,
                    status=0, description="下架", attributes=None),  # status=0 不在售
     ]
     s.add_all(orders + items + products)
@@ -150,11 +150,11 @@ def test_product_mysql_impl_get_product(seeded_session):
 def test_product_mysql_impl_search_products(seeded_session):
     """#6 LIKE 搜索 + limit"""
     svc = MySQLProductService()
-    hits = _run(svc.search_products("手机", limit=10))
+    hits = _run(svc.search_products("加绒", limit=10))
     skus = {p.sku for p in hits}
-    assert skus == {"SKU1", "SKU2"}          # 两款在售手机（下架的 SKU4 排除）
+    assert skus == {"SKU1", "SKU2"}          # 两款在售加绒款（下架的 SKU4 排除）
     # limit 生效
-    limited = _run(svc.search_products("手机", limit=1))
+    limited = _run(svc.search_products("加绒", limit=1))
     assert len(limited) == 1
 
 

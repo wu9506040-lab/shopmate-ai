@@ -6,6 +6,22 @@
 -- 幂等：uk_sku_price_version(sku, price_version) 冲突时更新价格与周期。
 -- =============================================================
 
+-- 建表（原先只在开发库手工建过，init 目录缺 DDL → 干净库/CI 跑到这里必报
+-- 1146 Table doesn't exist，级联让所有价目集成测试全红）
+CREATE TABLE IF NOT EXISTS product_prices (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  sku VARCHAR(50) NOT NULL COMMENT 'SKU',
+  price DECIMAL(10,2) NOT NULL COMMENT '当期价格',
+  effective_from DATE NOT NULL COMMENT '生效日',
+  effective_to DATE DEFAULT NULL COMMENT '失效日，NULL=长期有效',
+  price_version VARCHAR(32) NOT NULL DEFAULT '' COMMENT '价目版本，如 2026-11',
+  note VARCHAR(200) DEFAULT NULL COMMENT '备注',
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_sku_price_version (sku, price_version),
+  KEY idx_sku_effective (sku, effective_from)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='商品周期价目';
+
 -- 1) 历史价（已结束）
 INSERT INTO product_prices (sku, price, effective_from, effective_to, price_version, note)
 SELECT sku, ROUND(price * 0.92, 2), '2026-01-01', '2026-10-31', '2026-Q3', '历史价目，仅供 10 月前订单核对'

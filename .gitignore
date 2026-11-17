@@ -210,3 +210,7 @@ backend/logs/
 
 # 工作区本地记忆（WorkBuddy 项目笔记，不进公开仓库）
 .workbuddy/
+
+# pytest 临时目录（--basetemp 指到项目内时产生）与 junit 报告
+.pytest_tmp/
+ci_result.xml

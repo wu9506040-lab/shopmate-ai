@@ -62,7 +62,7 @@ def _make_fake_hits(prefix: str, n: int = 3) -> list[dict]:
     ]
 
 
-def _slow_search(query, top_k=3):
+def _slow_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax
     """模拟 search_policy：sleep SLEEP_PER_QUERY + 返 fake hits"""
     time.sleep(SLEEP_PER_QUERY)
     return _make_fake_hits(query, 2)
@@ -200,14 +200,14 @@ A8_PARALLEL_MAX_SECONDS = 1.5
 A8_SPEEDUP_MIN_RATIO = 2.0
 
 
-def _slow_full_search(query, top_k=3):
+def _slow_full_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax
     """模拟 search_policy 完整路径：粗排 0.3s + rerank 0.8s = 1.1s"""
     time.sleep(SLEEP_PER_QUERY)
     time.sleep(RERANK_SLEEP_SECONDS)
     return _make_fake_hits(query, top_k)
 
 
-def _slow_coarse(query, top_k=15):
+def _slow_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax
     """模拟 search_policy_coarse：仅粗排 0.3s（无 rerank）"""
     time.sleep(SLEEP_PER_QUERY)
     return _make_fake_hits(query, 2)
@@ -239,13 +239,13 @@ def test_a8_rerank_called_once_vs_a5_three_times():
     a5_calls = [0]
     a8_calls = [0]
 
-    def counting_slow_search(query, top_k=3):
+    def counting_slow_search(query, top_k=3, **kwargs):  # 吸收 skip_rerank/threshold_relax
         time.sleep(SLEEP_PER_QUERY)
         time.sleep(RERANK_SLEEP_SECONDS)
         a5_calls[0] += 1
         return _make_fake_hits(query, top_k)
 
-    def counting_slow_coarse(query, top_k=15):
+    def counting_slow_coarse(query, top_k=15, **kwargs):  # 吸收 threshold_relax
         time.sleep(SLEEP_PER_QUERY)
         return _make_fake_hits(query, 2)
 

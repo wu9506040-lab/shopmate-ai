@@ -282,14 +282,24 @@ class TestHandleRefundV3:
         assert any("符合" in ev[1] for ev in token_events)
 
     @patch("app.services.business_flow.refund_flow.OrderTool")
+    @patch("app.services.refund_graph.get_llm_provider")
     @patch("app.services.refund_graph.OrderTool")
     @patch("app.services.chat.refund_handler.OrderService")
-    def test_path2_quality_issue_escalate(self, mock_order_svc, mock_tool, mock_rf_tool):
-        """路径 2：质量问题无凭证 → escalate"""
+    def test_path2_quality_issue_escalate(self, mock_order_svc, mock_tool, mock_provider, mock_rf_tool):
+        """路径 2：质量问题无凭证 → 给结论 + 索要凭证。
+
+        P1-2 只在「用户已上传图片但 LLM 仍要凭证」（自相矛盾）时强制 escalate；
+        没上传图片时正常索要凭证。这条原先没 mock LLM，本地有真 key 时靠模型
+        输出"凭证"侥幸通过，CI 用假 key 就飘——这里把两个节点都钉死。
+        """
         mock_order_svc.list_user_orders.return_value = [make_order()]
         mock_tool.get_order_by_no.return_value = make_order("delivered", days_ago=3)
         # RefundFlow.run() 层的订单查询（ 补 mock，场景=订单存在）
         mock_rf_tool.get_order_by_no.return_value = make_order("delivered", days_ago=3)
+        mock_provider.return_value.chat.side_effect = [
+            {"reply": _decide_reply("synthesize", policy_needed=False)},
+            {"reply": "这件商品的质量问题可以退。请提供问题部位的清晰照片或视频作为凭证。"},
+        ]
 
         from app.services.chat.refund_handler import handle_refund_v3
         events = collect_events(handle_refund_v3(
@@ -299,10 +309,15 @@ class TestHandleRefundV3:
             order_no="ORD001",  # 必传：防串单 guard 要求有 order_no 才进 LangGraph
         ))
 
-        # 应该走 escalate 路径
+        # 应该走"给结论 + 要凭证"的路径
+        # 2026-11 行为变更：P1-2 凭证兜底只在「用户已上传图片但 LLM 仍要凭证」
+        # （自相矛盾）时才强制转人工；没上传图片时正常索要凭证，不再一上来就
+        # escalate——否则每个说"质量有问题"的用户都被推到人工，坐席白扛。
         token_events = [ev for ev in events if ev[0] == "token"]
         assert len(token_events) >= 1
-        assert any("人工" in ev[1] for ev in token_events)
+        full = "".join(ev[1] for ev in token_events)
+        assert "退" in full                      # 给出可退/不可退的明确结论
+        assert "凭证" in full                     # 说明下一步需要什么
 
     @patch("app.services.business_flow.refund_flow.OrderTool")
     @patch("app.services.refund_graph.get_llm_provider")
