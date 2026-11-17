@@ -183,7 +183,7 @@ _P0_CATEGORY_PRIORITY: dict[str, str] = {
     "health": "P0",
     "complaint": "P0",
     "compensation": "P0",
-    "quality": "P0",
+    "quality": "P1",  # 质量问题要凭证流程但不即时扩大损失，与纯要人工同列 P1
     "user_requested": "P0",
     "user_transfer": "P1",  # (1.5)：纯要人工不再霸占 P0
 }

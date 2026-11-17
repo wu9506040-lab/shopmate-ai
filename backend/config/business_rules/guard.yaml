@@ -150,10 +150,13 @@ ESCALATE_P0_KEYWORDS:
   user_requested: ["起诉", "律师"]
   user_transfer: ["转人工", "转主管", "机器人", "人工客服", "真人客服", "找人工", "转接人工"]
 ESCALATE_P0_PRIORITY:
+  # P0 只留「答错会真出事」的三类：健康（已出现身体反应）、投诉（市监/曝光风险）、
+  # 赔付（金额与法规诉求）。质量问题要凭证流程，但不会即时扩大损失，与纯要人工同列 P1 排队，
+  # 否则 quality 一命中就 P0，坐席队列会被「非质量问题退换」这类 AI 自己说的词淹没。
   health: "P0"
   complaint: "P0"
   compensation: "P0"
-  quality: "P0"
+  quality: "P1"
   user_requested: "P0"
   user_transfer: "P1"
 
