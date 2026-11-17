@@ -373,10 +373,27 @@ class Synthesizer:
                 f"query={query[:40]!r}",
                 extra={"intent": "policy_query", "rerouted_from": _orig_primary},
             )
+            # 只改 primary 不够：intents 列表里还留着 refund_query，会被
+            # get_secondary_intents 当成次意图派发 → RefundAgent 解析订单
+            # → 0 单话术拼在政策答案后面（实测「退货要自己寄吗」翻车）。
+            # 用户问的是政策，根本没提自己的订单，原意图必须一并清掉。
+            # 清完为空（原句只有订单/退款一个意图）时补一个 policy_query
+            # 条目，保持列表非空且与 primary 一致——直接兜底回原 intents
+            # 等于白清，refund_query 依然会被当次意图派发。
+            cleaned_intents = [
+                i for i in intent_result.get("intents", [])
+                if i.get("intent") != _orig_primary
+            ]
+            if not cleaned_intents:
+                cleaned_intents = [{
+                    "intent": "policy_query",
+                    "confidence": intent_result.get("confidence", 0.0),
+                }]
             intent_result = {
                 **intent_result,
                 "primary": "policy_query",
                 "rerouted_from": _orig_primary,
+                "intents": cleaned_intents,
             }
 
         # （2.3）：内部事件携带当轮意图决策快照——chat.py 消费后随消息落库

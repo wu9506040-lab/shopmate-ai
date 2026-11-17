@@ -101,3 +101,16 @@ class TestReroute:
         assert should_reroute_to_policy("为什么我的单还没发货", "order_query") is False
         # 纯问规则 → 改判
         assert should_reroute_to_policy("发货一般多久", "order_query") is True
+
+    def test_wo_yao_anchor_blocks_reroute(self):
+        """「我要退款怎么操作」含疑问词但没有「我的」——没有「我要」锚点时
+        会被误改判成政策问答，真退款请求拿不到人工。繁体同理。"""
+        assert has_personal_reference("我要退款怎么操作") is True
+        assert should_reroute_to_policy("我要退款怎么操作", "refund_query") is False
+        assert should_reroute_to_policy("我要退貨，可以嗎", "refund_query") is False
+
+    def test_yaoshi_hypothetical_followup(self):
+        """「那要是洗过了」这类假设式追问没有常规疑问词，漏判会掉进
+        退款链路回 0 单话术（实测 60 条压测翻车）。"""
+        assert should_reroute_to_policy("那要是洗过了", "refund_query") is True
+        assert should_reroute_to_policy("要是剪了吊牌呢", "refund_query") is True

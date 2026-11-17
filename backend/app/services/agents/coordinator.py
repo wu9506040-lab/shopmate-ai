@@ -84,6 +84,26 @@ def chain_with_secondary(
         if secondary_agent is None:
             continue
 
+        # 订单/退款类次意图先过改判尺：意图分类常把物流/政策问句
+        # 顺带判出 order_query/refund_query（「能指定顺丰吗」→ product+order）。
+        # 用户没提自己的订单（无个人锚点），派 OrderAgent 只会解析出
+        # 0 单话术拼在主答案后面，纯噪音。同把尺子已在 orchestrator
+        # 改判主意图时用过，这里对次意图保持同一口径。
+        if secondary_intent in ("order_query", "refund_query"):
+            from app.services.chat.order_scope import should_reroute_to_policy
+            from app.services.chat.orchestrator import _has_locked_order
+
+            if should_reroute_to_policy(
+                ctx.query, secondary_intent,
+                has_locked_order=_has_locked_order(ctx.session_id, ctx.user_id),
+            ):
+                logger.info(
+                    f"[dual-dispatch] 跳过次意图 {secondary_intent}："
+                    f"无个人锚点，属政策/物流问句 query={ctx.query[:40]!r}",
+                    extra={"intent": secondary_intent, "dual": True},
+                )
+                continue
+
         logger.info(
             f"[dual-dispatch] primary={primary} done, 补答次意图 {secondary_intent} "
             f"(expert={secondary_agent.name})",
