@@ -8,7 +8,7 @@
 > 评测集 `data/evalsets/evalset_v3_fashion.json`（66 条七维评测，含边界/安全/权限 34 条）。本地直跑见 `backend/run_local.sh`、
 > `java-platform/run_local.sh`，中间件走 Docker 容器映射端口。
 
-[![CI](https://github.com/wu9506040-lab/shopmate-ai-/actions/workflows/ci.yml/badge.svg)](https://github.com/wu9506040-lab/shopmate-ai-/actions/workflows/ci.yml)
+[![CI](https://github.com/wu9506040-lab/shopmate-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/wu9506040-lab/shopmate-ai/actions/workflows/ci.yml)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Vue3](https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vuedotjs)](https://vuejs.org)
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python)](https://python.org)
@@ -244,8 +244,8 @@ LLM 只生成话术、不产生价格结论。配合引用校验与兜底话术�
 
 ```bash
 # 1. 克隆
-git clone git@github.com:wu9506040-lab/shopmate-ai-.git
-cd shopmate-ai-
+git clone git@github.com:wu9506040-lab/shopmate-ai.git
+cd shopmate-ai
 
 # 2. 配置环境变量
 cp deploy/.env.example deploy/.env.dev
