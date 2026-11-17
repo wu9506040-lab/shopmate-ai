@@ -113,6 +113,14 @@ sequenceDiagram
 
 ## 📸 界面截图
 
+**人工坐席工作台**（三栏：会话列表 / 对话窗口 / 客户信息；AI 结构化应答，人工可随时接管续聊）
+
+![人工坐席工作台](docs/screenshots/workbench.png)
+
+**人工介入工作台**（转人工工单按 P0-P2 排队；右侧带转人工原因与完整会话上下文，认领后人工续聊、处理完成结单）
+
+![人工介入工作台](docs/screenshots/handoff.png)
+
 **数据看板**（ECharts 11 图 · 真实统计：消息趋势 / 渠道分布 / 峰值时段 / 响应时间 / 热门问题 TOP10 / 意图分类）
 
 ![数据看板](docs/screenshots/dashboard.png)
