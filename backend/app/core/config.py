@@ -252,6 +252,25 @@ class Settings(BaseSettings):
     # 预加载订单上限（与 user_context_preloader.MAX_RECENT_ORDERS 对齐）
     USER_CONTEXT_PRELOAD_MAX_ORDERS: int = 5
 
+    # ---- 订单多渠道查询（自有商城 + 淘宝/抖店/…） ----
+    # ORDER_CHANNELS: 参与查询的渠道，逗号分隔；local 强制保留（自有商城是兜底）。
+    # 语义变化：本地库查不到时不再直接判定「没有订单」，而是并发去各平台问一遍，
+    #   只有所有渠道都查通且都是 0 单，才能说「确实没有」。有渠道没查成，
+    #   话术会如实说「没查到 / 接口不通」，而不是「您没有订单」。
+    # 未配置凭证的外部渠道标记 DISABLED，不发请求，不影响对话延迟。
+    ORDER_CHANNELS: str = "local"
+    # 单渠道查询超时（秒）。外部平台慢时会吃满这个时间，默认压到 2s ——
+    # 宁可如实说「没查到」，也不要为了等一个平台把整轮对话卡住。
+    ORDER_CHANNEL_TIMEOUT: float = 2.0
+    # 淘宝开放平台（TOP）凭证：三件套缺任一则该渠道不启用
+    TAOBAO_APP_KEY: str = ""
+    TAOBAO_APP_SECRET: str = ""
+    TAOBAO_SESSION_KEY: str = ""
+    # 抖店开放平台凭证：缺任一则该渠道不启用
+    DOUYIN_APP_KEY: str = ""
+    DOUYIN_APP_SECRET: str = ""
+    DOUYIN_SHOP_ID: str = ""
+
     # ---- 三部分架构（前端 | Java 中台 | Python AI）路由收窄开关 ----
     # False（默认）：保持全量路由，兼容直连部署与历史测试。
     # True：Python 只注册 AI 内核路由（chat/intent/channels/知识库入库），

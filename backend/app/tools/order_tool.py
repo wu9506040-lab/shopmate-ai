@@ -27,17 +27,43 @@ class OrderTool:
         """
         查某用户的所有订单（可选按状态过滤）
 
+        查的是**全部已接入渠道**（自有商城 + 淘宝/抖店…），不是只查本地库。
+        买家在淘宝下的单也算「他的订单」，本地库查不到不等于没有。
+
         Args:
             user_id: 用户 ID（必传）
             status: 订单状态过滤（pending/paid/shipped/delivered/completed/refunded）
             limit: 最大返回数
 
         Returns:
-            订单 dict 列表（按 create_time DESC）
+            订单 dict 列表（按 create_time DESC，每条带 channel 标明来源）
         """
         svc = get_order_service_factory().get_order_service()
         orders, _ = run_sync(svc.list_user_orders(user_id, status=status, limit=limit))
         return [OrderTool._order_dto_to_dict(o) for o in orders]
+
+    @staticmethod
+    def list_user_orders_with_probe(
+        user_id: int, status: Optional[str] = None, limit: int = 20,
+    ) -> tuple[list[dict], list]:
+        """查订单 + 同时返回各渠道的探测状态。
+
+        0 单场景必须靠探测状态说话术：只有「所有渠道都查通且 0 单」才能说
+        没有订单；有渠道没配 / 接口不通时只能说「没查到」，让用户补单号或转人工。
+        决策层（OrderContextResolver）用它，普通查询用 list_user_orders 即可。
+        """
+        from app.services.order.channels.aggregator import probe_channel_orders
+
+        dtos, probe = probe_channel_orders(user_id, status=status, limit=limit)
+        return [OrderTool._order_dto_to_dict(o) for o in dtos], probe
+
+    @staticmethod
+    def probe_channels(user_id: int, limit: int = 20) -> list:
+        """只探渠道状态不取详情（审计 / 排查用）。"""
+        from app.services.order.channels.aggregator import probe_channel_orders
+
+        _, probe = probe_channel_orders(user_id, limit=limit)
+        return probe
 
     @staticmethod
     def get_order_by_no(user_id: int, order_no: str) -> Optional[dict]:
@@ -110,12 +136,17 @@ class OrderTool:
 
     @staticmethod
     def _order_dto_to_dict(o) -> dict:
-        """OrderService.Order (DTO) → dict（与旧 _order_to_dict 字段/格式一致）"""
+        """OrderService.Order (DTO) → dict（与旧 _order_to_dict 字段/格式一致）
+
+        额外带 channel（local / taobao / douyin …）：多渠道下必须能说清这单
+        来自哪个平台，退换规则和售后入口都不一样。
+        """
         return {
             "order_no": o.order_no,
             "status": o.status,
             "total_amount": float(o.total_amount),
             "create_time": o.create_time.isoformat() if o.create_time else None,
+            "channel": getattr(o, "channel", "local"),
         }
 
     @staticmethod

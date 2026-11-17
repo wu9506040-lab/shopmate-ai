@@ -171,15 +171,23 @@ def test_product_mysql_impl_get_recommendations(seeded_session):
 # =============================================================
 # #8 Factory
 # =============================================================
-def test_factory_returns_mysql_impl():
-    """#8 get_order_service() → MySQLOrderService；get_product_service() → MySQLProductService"""
+def test_factory_returns_channel_service():
+    """#8 get_order_service() → 多渠道聚合实现（内部含自有商城渠道）
+
+    2026-11 改造：工厂不再直接返回 MySQLOrderService，而是返回
+    ChannelOrderService —— 它按 ORDER_CHANNELS 并发查自有商城 + 淘宝/抖店。
+    只配 local 时行为与 MySQL 实现等价，仍满足 OrderService Protocol 契约。
+    """
+    from app.services.order.channels.aggregator import ChannelOrderService
     from app.services.order.factory import get_order_service_factory
 
     factory = get_order_service_factory()
-    assert isinstance(factory.get_order_service(), MySQLOrderService)
+    order_svc = factory.get_order_service()
+    assert isinstance(order_svc, ChannelOrderService)
+    assert "local" in order_svc.channel_names
     assert isinstance(factory.get_product_service(), MySQLProductService)
-    # 协议 runtime_checkable 一致性
-    assert isinstance(factory.get_order_service(), OrderService)
+    # 协议 runtime_checkable 一致性（聚合层必须仍满足 OrderService 契约）
+    assert isinstance(order_svc, OrderService)
     assert isinstance(factory.get_product_service(), ProductService)
 
 
@@ -232,4 +240,7 @@ def test_order_tool_uses_protocol():
         "status": "shipped",
         "total_amount": 250.0,
         "create_time": "2026-07-01T10:00:00",
+        # 多渠道后必须标明来源，否则「这单在淘宝买的」和「官网买的」
+        # 会被答成同一套退换规则
+        "channel": "local",
     }

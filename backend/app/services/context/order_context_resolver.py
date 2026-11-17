@@ -76,6 +76,9 @@ class OrderResolverResult:
     total_orders: int = 0
     # 候选是否被截断（N>MAX_PICKER_ITEMS 时 True）
     truncated: bool = False
+    # 各渠道探测状态（local/taobao/douyin 各自 ok/disabled/unbound/error）。
+    # 0 单话术必须靠它区分「确实没有」和「有渠道没查成」，也进审计便于排查。
+    channel_probe: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +89,10 @@ class OrderResolverResult:
             "candidate_orders": self.candidate_orders,
             "total_orders": self.total_orders,
             "truncated": self.truncated,
+            "channel_probe": [
+                {"channel": r.channel, "status": r.status.value, "detail": r.detail}
+                for r in (self.channel_probe or [])
+            ],
         }
 
 
@@ -228,13 +235,17 @@ class OrderContextResolver:
                     total_orders=1,
                 )
 
-        # 4. 列最近订单（0/1/N）
+        # 4. 列最近订单（0/1/N）—— 多渠道并发查。
+        #    本地库查不到不代表没订单：买家可能在淘宝/抖店下的单，那几个平台
+        #    的单不在自有库里。所以这里查的是「所有已接入渠道」，并把各渠道
+        #    的探测状态一起带出来 —— 0 单时话术要靠它区分
+        #    「查过了确实没有」和「有个渠道没查成」，不能一律说「您没有订单」。
         try:
-            recent_orders = OrderTool.list_user_orders(
+            recent_orders, channel_probe = OrderTool.list_user_orders_with_probe(
                 user_id, limit=MAX_PICKER_ITEMS + 1,  # 多取 1 用来判断是否截断
             )
         except Exception as e:
-            # DB 故障 → 降级 DIRECT_ANSWER（让 orchestrator 走老路径兜底）
+            # DB / 渠道全挂 → 降级 DIRECT_ANSWER（让 orchestrator 走老路径兜底）
             logger.warning(
                 f"order_resolver: list_user_orders failed: user_id={user_id}, {e}"
             )
@@ -254,6 +265,7 @@ class OrderContextResolver:
                 intent=intent,
                 reason="zero_orders",
                 total_orders=0,
+                channel_probe=channel_probe,
             )
 
         if total == 1:

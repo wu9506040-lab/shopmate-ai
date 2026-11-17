@@ -172,8 +172,18 @@ class TestHandleRefundV3:
     @patch.object(settings, "ENABLE_ORDER_RESOLVER", True)
     @patch("app.services.context.order_context_resolver.OrderTool")
     def test_no_orders(self, mock_tool):
-        """2026-07-18 改造：没订单 → 走 Resolver ASK_LOGIN_OR_LIST（不再问订单号）"""
-        mock_tool.list_user_orders.return_value = []  # 0 单
+        """0 单 → Resolver ASK_LOGIN_OR_LIST，话术按渠道探测结果如实说明。
+
+        2026-11 改造：0 单不再断言「您当前没有订单」。旧文案只查了自有商城库，
+        买家在淘宝下的单也是他的订单，这么说等于把有单的人打发走。
+        现在返回的是「已查过 X，没有查到订单记录」+ 明确列出查过哪些渠道。
+        """
+        from app.services.order.channels.base import ChannelQueryResult, ChannelStatus
+
+        mock_tool.list_user_orders_with_probe.return_value = (
+            [],  # 0 单
+            [ChannelQueryResult("local", ChannelStatus.OK, [], "")],
+        )
         mock_tool.get_order_by_no.return_value = None
 
         from app.services.chat.refund_handler import handle_refund_v3
@@ -188,8 +198,11 @@ class TestHandleRefundV3:
 
         # Resolver 决策被推送（resolver_action=ask_login_or_list）
         assert any(m[1].get("resolver_action") == "ask_login_or_list" for m in meta_events)
-        # 提示 token 含「没有订单」
-        assert any("没有订单" in ev[1] for ev in token_events)
+        # 话术是「没查到」而不是「你没有」；且点明查过哪个渠道
+        joined = "".join(ev[1] for ev in token_events)
+        assert "没有查到订单" in joined
+        assert "自有商城" in joined
+        assert "没有订单" not in joined  # 不许下断言
         # 关键：不再 yield 旧版「订单号」prompt
         assert not any("订单号" in ev[1] for ev in token_events)
 

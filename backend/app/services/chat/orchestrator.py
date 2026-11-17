@@ -55,6 +55,8 @@ from app.tools.product_tool import ProductTool
 from app.services import profile_service
 
 from app.services.chat import prompt_assembler, stream_dispatcher
+from app.services.chat.order_scope import should_reroute_to_policy
+from app.services.order.channels.aggregator import describe_zero_orders
 from app.services.agents.registry import AgentContext, get_expert  # V21 M3-1
 # audit 上报（5 个 resolver action 路径全留痕）
 from app.services.audit_service import try_log_action
@@ -117,6 +119,21 @@ def _inherit_intent_on_followup(
     except Exception:  # noqa: BLE001
         return primary
     return last if last in _INHERITABLE_INTENTS else primary
+
+
+def _has_locked_order(session_id: Optional[str], user_id: Optional[int]) -> bool:
+    """会话是否已锁定某一单（决定「政策问句改判」要不要放行）。
+
+    锁定了就说明用户正在处理那一单，「那能退吗」确实是问自己的单，不能改判。
+    读上下文失败时按「未锁定」处理：宁可走一遍订单链路（现在查不到也会
+    如实说查不到），也不要把真退款请求错判成政策问答。
+    """
+    if not session_id or not user_id:
+        return False
+    try:
+        return bool(get_context_service().load(session_id, user_id).current_order_no)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _load_l3_block(user_id: Optional[int], l2_facts: Optional[dict]) -> tuple[str, list]:
@@ -337,6 +354,30 @@ class Synthesizer:
                 f"query={query[:30]!r}"
             )
             intent_result = {**intent_result, "primary": inherited, "inherited": True}
+
+        # 政策问句改判 —— 订单链路的入口护栏。
+        # 「退货运费谁出」「七天无理由怎么算」这类句子会被分类成 refund_query，
+        # 而退款/订单链路第一步就是解析订单：用户没下过单（或在淘宝下的单），
+        # 解析出 0 单就直接回「您没有订单」，一个纯政策问题被订单解析吃掉。
+        # 规则：无个人锚点（我这单 / 订单号 / 我上周买的）+ 有规则疑问特征
+        #       + 会话未锁定订单 → 改判 policy_query 走 RAG。
+        # 60 条多轮实测里 16 条栽在这条路径上，其中 5 条意图本来就已经是
+        # policy_query，是在链路内部又被订单解析器截断的。
+        _orig_primary = intent_result.get("primary")
+        if should_reroute_to_policy(
+            query, _orig_primary or "",
+            has_locked_order=_has_locked_order(session_id, user_id),
+        ):
+            logger.info(
+                f"synth.reroute_to_policy: {_orig_primary} → policy_query "
+                f"query={query[:40]!r}",
+                extra={"intent": "policy_query", "rerouted_from": _orig_primary},
+            )
+            intent_result = {
+                **intent_result,
+                "primary": "policy_query",
+                "rerouted_from": _orig_primary,
+            }
 
         # （2.3）：内部事件携带当轮意图决策快照——chat.py 消费后随消息落库
         # （intent_snapshot 列），不外发 SSE。👎/badcase 反查的 join 地基：
@@ -773,7 +814,11 @@ class Synthesizer:
             return
 
         if result.action == OrderResolverAction.ASK_LOGIN_OR_LIST:
-            # 0 订单
+            # 0 单：必须按「查过哪些渠道、哪个没查成」说话术。
+            # 旧文案「您当前还没有订单记录哦～」是断言用户的资产状态，但当时
+            # 只查了自有商城库——买家在淘宝下的单一样是他的订单，这句话会
+            # 直接把一个真有单的人打发走。现在只有全渠道查通且 0 单才敢这么说。
+            zero_msg = describe_zero_orders(result.channel_probe, query)
             meta = Synthesizer._build_order_meta(
                 intent_result=intent_result,
                 detail=None,
@@ -782,9 +827,7 @@ class Synthesizer:
                 resolver_result=result,
             )
             yield ("meta", meta)
-            yield from stream_dispatcher.stream_simple(
-                "您当前还没有订单记录哦～ 如果刚下单，可能还未同步，请稍后再试。"
-            )
+            yield from stream_dispatcher.stream_simple(zero_msg)
             # 埋点（card 不应发：0 订单无候选）
             metrics.inc_resolver_decision(
                 action=result.action.value,
@@ -802,6 +845,11 @@ class Synthesizer:
                     "resolver_reason": result.reason,
                     "total_orders": 0,
                     "card_sent": False,
+                    # 哪个渠道查过 / 没配 / 不通，排查「用户说他有单」时就看这里
+                    "channel_probe": [
+                        {"channel": r.channel, "status": r.status.value, "detail": r.detail}
+                        for r in (result.channel_probe or [])
+                    ],
                 },
             )
             return

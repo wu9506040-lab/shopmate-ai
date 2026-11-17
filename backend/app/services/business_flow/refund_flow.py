@@ -35,6 +35,7 @@ from typing import Any, Generator, Optional, Tuple
 from app.core.config import settings
 from app.services.chat.prompt_assembler import NO_LOGIN_PROMPT, _extract_order_no_from_history
 from app.services.chat.stream_dispatcher import stream_simple
+from app.services.order.channels.aggregator import describe_zero_orders
 from app.services.context.context_service import (
     ConversationContext,
     get_context_service,
@@ -331,7 +332,8 @@ class RefundFlow:
                 yield from stream_simple(text)
                 return  # 等待用户点选后下一轮带 order_no 进来
 
-            # 2.3 0 单 → 明确告知
+            # 2.3 0 单 → 按渠道探测结果如实说明（哪些渠道查过 / 哪个没查成）
+            #     不能一律说「没有订单」：自有商城查不到不代表买家没在别的平台下单。
             elif result.action == OrderResolverAction.ASK_LOGIN_OR_LIST:
                 yield ("meta", {
                     "intent": "refund_query",
@@ -344,7 +346,9 @@ class RefundFlow:
                     "resolver_reason": result.reason,
                     "total_orders": 0,
                 })
-                yield from stream_simple("您当前没有订单，暂时无法处理哦～")
+                yield from stream_simple(
+                    describe_zero_orders(result.channel_probe, self.query)
+                )
                 return
 
             # 2.4 NOT_FOUND（提供了无效 order_no）/ ASK_LOGIN（匿名）兜底

@@ -8,7 +8,7 @@ run_sync：把 Protocol 的 async 方法在 sync Tool 层安全执行的桥接�
 import asyncio
 from typing import Any, Awaitable
 
-from app.services.order.mysql_impl import MySQLOrderService, MySQLProductService
+from app.services.order.mysql_impl import MySQLProductService
 from app.services.order.protocols import OrderService, ProductService
 
 
@@ -24,7 +24,12 @@ def run_sync(coro: Awaitable[Any]) -> Any:
 
 
 class DefaultOrderServiceFactory:
-    """默认工厂（MySQL 实现，单例懒加载）"""
+    """默认工厂（多渠道聚合实现，单例懒加载）
+
+    get_order_service() 返回 ChannelOrderService —— 内部按 settings.ORDER_CHANNELS
+    并发查自有商城 + 各外部平台（淘宝/抖店/...）。只配 local 时行为与
+    MySQLOrderService 等价，所以调用方（OrderTool / 各 handler）无需改动。
+    """
 
     def __init__(self) -> None:
         self._order_service: OrderService | None = None
@@ -32,7 +37,9 @@ class DefaultOrderServiceFactory:
 
     def get_order_service(self) -> OrderService:
         if self._order_service is None:
-            self._order_service = MySQLOrderService()
+            from app.services.order.channels.aggregator import get_channel_order_service
+
+            self._order_service = get_channel_order_service()
         return self._order_service
 
     def get_product_service(self) -> ProductService:

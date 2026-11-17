@@ -62,6 +62,7 @@ from app.services.refund_service import RefundService
 from app.services.session_service import ANONYMOUS_USER_ID
 
 from app.services.chat import prompt_assembler, stream_dispatcher
+from app.services.order.channels.aggregator import describe_zero_orders
 
 # Synthesizer._build_order_card_payload 是静态方法（跨模块纯函数）
 # 用 lazy import 避免 refund_handler ↔ orchestrator 循环导入
@@ -191,6 +192,8 @@ def handle_refund_v2(
             return
 
         elif result.action == OrderResolverAction.ASK_LOGIN_OR_LIST:
+            # 0 单：按渠道探测结果说话，不再断言「您当前没有订单」。
+            # 只查自有商城就说没有订单，会漏掉买家在淘宝/抖店下的单。
             yield ("meta", {
                 "intent": "refund_query",
                 "entities": entities,
@@ -199,7 +202,9 @@ def handle_refund_v2(
                 "resolver_action": result.action.value,
                 "total_orders": 0,
             })
-            yield from stream_dispatcher.stream_simple("您当前没有订单，暂时无法处理哦～")
+            yield from stream_dispatcher.stream_simple(
+                describe_zero_orders(result.channel_probe, query)
+            )
             return
 
         else:

@@ -235,12 +235,22 @@ def _format_tool_result(intent: str, tool_result: Optional[dict]) -> str:
         if "orders" in tool_result:
             orders = tool_result.get("orders", [])
             if not orders:
-                return "[订单] 用户当前没有订单。"
+                # 措辞很关键：这里查的是「已接入的全部渠道」，但没说全部渠道都查通。
+                # 写「用户当前没有订单」LLM 会直接断言买家资产状态，把在淘宝/
+                # 抖店下过单的人当成没买过东西。写成「未查到」+ 让 LLM 索要单号，
+                # 才是客服该有的下一步动作。
+                return (
+                    "[订单] 已按账号查过自有商城及已接入的电商平台，未查到订单记录。"
+                    "请勿断言用户没有订单；如用户坚持有单，请其提供订单号后按单号复核，"
+                    "或转人工协助。"
+                )
             lines = ["[订单] 用户共有 {} 笔订单：".format(len(orders))]
             for o in orders:
+                channel = o.get("channel") or "local"
+                channel_note = "" if channel == "local" else f" | 来源 {channel}"
                 lines.append(
                     f"- 订单号 {o.get('order_no')} | 状态 {o.get('status')} | "
-                    f"金额 ¥{o.get('total_amount')} | 下单时间 {o.get('create_time')}"
+                    f"金额 ¥{o.get('total_amount')} | 下单时间 {o.get('create_time')}{channel_note}"
                 )
             return "\n".join(lines)
         if "order" in tool_result:

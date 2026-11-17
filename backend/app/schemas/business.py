@@ -27,6 +27,10 @@ class Order(BaseModel):
 
     status 取值：pending / paid / shipped / delivered / completed
     / cancelled / refunding / refunded（接入方可扩展，AI 客服按字符串消费）。
+
+    channel：这单来自哪个渠道（local=自有商城 / taobao / douyin / ...）。
+    多渠道聚合后必须能区分来源，否则「这单在淘宝买的」和「这单在官网买的」
+    会被答成同一套退换规则（运费承担方、售后入口都不一样）。
     """
     order_no: str
     user_id: int
@@ -39,6 +43,7 @@ class Order(BaseModel):
     tracking_no: Optional[str] = None
     create_time: datetime
     update_time: datetime
+    channel: str = "local"                   # 订单来源渠道（聚合层标注）
 
 
 class Product(BaseModel):
